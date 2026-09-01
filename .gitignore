@@ -1,0 +1,11 @@
+node_modules/
+lib/
+dist/
+*.tsbuildinfo
+.probe/
+tests/probe/
+# IDE
+.idea/
+.vscode/
+
+.local
