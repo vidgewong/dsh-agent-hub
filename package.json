@@ -4,7 +4,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.1.0-rc1",
+  "version": "0.1.0-rc2",
   "repository": "github:vidgewong/dsh-agent-hub",
   "type": "module",
   "main": "lib/index.js",
@@ -61,12 +61,8 @@
     "@anthropic-ai/sdk": "0.93.0",
     "@deepseek-ai/schemastery": "3.18.1"
   },
-  "optionalDependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.220",
-    "@earendil-works/pi-coding-agent": "0.84.3",
-    "@openai/codex": "0.149.1"
-  },
   "peerDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.220",
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": "0.1.1-rc.2",
     "@deepseek-ai/dsh-agent-loop": "0.1.1-rc.2",
@@ -77,11 +73,14 @@
     "@deepseek-ai/dsh-session-persistence": "0.1.1-rc.2",
     "@deepseek-ai/dsh-settings": "0.1.1-rc.2",
     "@deepseek-ai/dsh-subprocess": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-timeout": "0.1.1-rc.2"
+    "@deepseek-ai/dsh-timeout": "0.1.1-rc.2",
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@openai/codex": "0.149.1"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-attachment": "0.1.1-rc.2",
+    "@anthropic-ai/claude-agent-sdk": "0.3.220",
     "@deepseek-ai/dsh-agent-loop": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-attachment": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-locale": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-store": "0.1.2-alpha.2",
@@ -93,6 +92,8 @@
     "@deepseek-ai/dsh-session-persistence-jsonl": "0.1.1-rc.2",
     "@deepseek-ai/dsh-subprocess-local": "0.1.1-rc.2",
     "@deepseek-ai/dsh-system-prompt": "0.1.1-rc.2",
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@openai/codex": "0.149.1",
     "@types/node": "^22.20.0",
     "@types/react": "^19.0.0",
     "@vitest/coverage-v8": "^4.1.8",
@@ -103,5 +104,16 @@
     "vite-tsconfig-paths": "^6.1.1",
     "vitest": "^4.1.8",
     "yaml": "^2.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/claude-agent-sdk": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@openai/codex": {
+      "optional": true
+    }
   }
 }

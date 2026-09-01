@@ -55,17 +55,35 @@ dsh plugin --profile web add @vidge/dsh-agent-hub
 > `agent-loop` 行，以便路由器接管 factory 槽位并由它自己重新挂载该 loop。文件中
 > 其余内容逐字节保留。
 
-### 依赖要求
+### 引擎依赖
+
+各引擎的 SDK 都是**可选 peer 依赖**——安装本插件只会装入路由器本身。按需添加你
+真正要用的引擎：
+
+```sh
+# Claude Code
+pnpm add @anthropic-ai/claude-agent-sdk
+# Codex
+pnpm add @openai/codex
+# Pi
+pnpm add @earendil-works/pi-coding-agent
+```
+
+`in-process` 引擎除 dsh 本身外无任何额外要求，因此一个 SDK 都不装的 profile 仍可
+正常工作。
+
+选择了 SDK 未安装的引擎时，只有该次对话失败，并给出需要安装哪个包的提示；不会影响
+其他会话或其他引擎。
+
+### 认证
 
 仅针对你实际使用的引擎：
 
-- **Claude Code** —— 宿主机安装 Claude Code CLI。凭证由 dsh 自身的 LLM provider
-  配置派生（见下文）；CLI 登录只是兜底，不是必需。
+- **Claude Code** —— 凭证由 dsh 自身的 LLM provider 配置派生（见下文）；CLI 登录
+  只是兜底，不是必需。
 - **Codex** —— 通过 `codex login` 认证，或提供 `CODEX_API_KEY`。
 - **Pi** —— 按 pi 自己的方式认证：`~/.pi/agent/auth.json`，或对应 provider 的
   API-key 环境变量。
-
-in-process 引擎除 dsh 本身外无任何额外要求。
 
 ## 使用
 

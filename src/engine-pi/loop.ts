@@ -97,12 +97,24 @@ function resolveConfig(config: Config): ResolvedConfig {
   }
 }
 
-/** Resolve the Pi CLI entrypoint from the package's pinned `bin` field. */
+/** Resolve the Pi CLI entrypoint from the optional peer's `bin` field. */
 function piCliEntrypoint(): string {
-  // The package is ESM-only (its `exports` exposes no `require` condition), so
-  // resolve the import entry and walk back to the package root to read `bin`.
-  const mainUrl = (import.meta as ImportMeta & { resolve: (specifier: string) => string })
-    .resolve('@earendil-works/pi-coding-agent')
+  // Resolved lazily rather than imported: the CLI is an optional peer, so a
+  // deployment that never selects this engine need not install it. Raised as a
+  // named error because the bare resolution failure is an opaque
+  // ERR_MODULE_NOT_FOUND that does not say which engine wanted what.
+  let mainUrl: string
+  try {
+    // The package is ESM-only (its `exports` exposes no `require` condition), so
+    // resolve the import entry and walk back to the package root to read `bin`.
+    mainUrl = (import.meta as ImportMeta & { resolve: (specifier: string) => string })
+      .resolve('@earendil-works/pi-coding-agent')
+  } catch (error: unknown) {
+    throw new Error(
+      'the Pi engine requires "@earendil-works/pi-coding-agent", which is not installed. '
+      + `Add it to this profile, or pick another engine for this session. (${String(error)})`,
+    )
+  }
   const root = dirname(dirname(fileURLToPath(mainUrl)))
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { bin?: string | Record<string, string> }
   const bin = pkg.bin

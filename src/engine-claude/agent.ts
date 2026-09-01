@@ -25,7 +25,7 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
-import { query as officialQuery, type SDKResultError } from '@anthropic-ai/claude-agent-sdk'
+import type { SDKResultError } from '@anthropic-ai/claude-agent-sdk'
 import type { ResolvedConfig } from './types.ts'
 import {
   mapAssistantMessage,
@@ -47,6 +47,42 @@ import {
 
 /** Provider route label used for logged header snapshots and message provenance. */
 const PROVIDER = 'claude-code'
+
+/** The official SDK's `query`, resolved on first use. */
+type OfficialQuery = typeof import('@anthropic-ai/claude-agent-sdk')['query']
+
+/** Memoized module load, so a session's steps do not re-resolve the SDK. */
+let claudeQueryPromise: Promise<OfficialQuery> | undefined
+
+/**
+ * Resolve the official SDK's `query` on first use.
+ *
+ * Deliberately dynamic. The SDK is an optional peer: a deployment that never
+ * selects the Claude Code engine should not have to install it, and this module
+ * is reached from the plugin's static import graph — a top-level import would
+ * make a missing package fail the whole plugin tree at load time, taking every
+ * other engine down with it. Importing here confines the failure to the engine
+ * that actually needs it, and surfaces it as a turn error naming the fix.
+ *
+ * @returns the SDK's `query` function.
+ * @throws when the optional peer is not installed.
+ */
+async function loadClaudeQuery(): Promise<OfficialQuery> {
+  claudeQueryPromise ??= import('@anthropic-ai/claude-agent-sdk').then(
+    (mod) => mod.query,
+    (error: unknown) => {
+      // Clear the slot so a later step retries rather than replaying a failure
+      // the user may have fixed by installing the package in the meantime.
+      claudeQueryPromise = undefined
+      throw new Error(
+        'the Claude Code engine requires "@anthropic-ai/claude-agent-sdk", which is not '
+        + 'installed. Add it to this profile, or pick another engine for this session. '
+        + `(${String(error)})`,
+      )
+    },
+  )
+  return claudeQueryPromise
+}
 /**
  * Model label logged when the deployment pins no model: Claude Code owns its
  * model natively, so the web session's advisory model selection is deliberately
@@ -561,6 +597,7 @@ export class ClaudeCodeAgent implements Agent {
         spawn: spec => this.loopCtx.subprocess.spawn(spec),
         onUnattended: (line) => { diagnostics.push(line) },
       }, controller)
+      const officialQuery = await loadClaudeQuery()
       const query = officialQuery({ prompt, options })
       let finished = false
       /** Seq numbers of the `assistant/chunk` events that streamed one message, for replay linking. */

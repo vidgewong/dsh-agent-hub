@@ -64,18 +64,35 @@ runtime state — switching never requires a restart again.
 > can take the factory slot and re-mount that loop itself. Everything else in
 > that file is preserved byte for byte.
 
-### Requirements
+### Engine dependencies
 
-Only for the engines you actually use:
+Each engine's SDK is an **optional peer** — installing this plugin pulls in the
+router only. Add the engines you actually want:
 
-- **Claude Code** — the Claude Code CLI installed on the host. Credentials are
-  derived from dsh's own LLM provider configuration (see below); a CLI login is
-  a fallback, not a requirement.
+```sh
+# Claude Code
+pnpm add @anthropic-ai/claude-agent-sdk
+# Codex
+pnpm add @openai/codex
+# Pi
+pnpm add @earendil-works/pi-coding-agent
+```
+
+The `in-process` engine needs nothing beyond dsh itself, so a profile that
+installs no SDK at all still works.
+
+Selecting an engine whose SDK is missing fails that turn with a message naming
+the package to install; it never affects other sessions or engines.
+
+### Authentication
+
+Only for the engines you use:
+
+- **Claude Code** — credentials are derived from dsh's own LLM provider
+  configuration (see below); a CLI login is a fallback, not a requirement.
 - **Codex** — authenticated via `codex login`, or a `CODEX_API_KEY` entry.
 - **Pi** — authenticated the way `pi` expects: its own `~/.pi/agent/auth.json`,
   or the provider's API-key environment variable.
-
-The in-process engine needs nothing beyond dsh itself.
 
 ## Usage
 

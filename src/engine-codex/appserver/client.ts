@@ -30,9 +30,20 @@ export type StderrHandler = (line: string) => void
 
 const require = createRequire(import.meta.url)
 
-/** Resolve the CLI entrypoint from this package's pinned `@openai/codex` dependency. */
+/** Resolve the CLI entrypoint from this package's optional `@openai/codex` peer. */
 function codexCliEntrypoint(): string {
-  return join(dirname(require.resolve('@openai/codex/package.json')), 'bin', 'codex.js')
+  // Resolved lazily rather than imported: the CLI is an optional peer, so a
+  // deployment that never selects this engine need not install it. Raised as a
+  // named error because the bare resolution failure is an opaque
+  // ERR_MODULE_NOT_FOUND that does not say which engine wanted what.
+  try {
+    return join(dirname(require.resolve('@openai/codex/package.json')), 'bin', 'codex.js')
+  } catch (error: unknown) {
+    throw new Error(
+      'the Codex engine requires "@openai/codex", which is not installed. Add it to '
+      + `this profile, or pick another engine for this session. (${String(error)})`,
+    )
+  }
 }
 
 /** JSON-RPC client for the codex app-server. */
