@@ -25,7 +25,7 @@ describe('renderManagedBlock', () => {
     const block = renderManagedBlock()
     expect(block.startsWith(`${MANAGED_BLOCK_BEGIN} --\n`)).toBe(true)
     expect(block).toContain('- id: agent-loop\n  disabled: true')
-    // The engines live inside dsh-loop-engine; the block only disables the
+    // The engines live inside dsh-agent-hub; the block only disables the
     // base loop so the single AgentFactory slot has no collision.
     expect(block).not.toContain('agent-loop-claude-code')
     // No engine name: the selection is runtime state now, not boot state.

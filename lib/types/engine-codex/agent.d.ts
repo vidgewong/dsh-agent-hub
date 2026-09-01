@@ -9,7 +9,7 @@
  * no interactive approval callback, so permissions are folded declaratively
  * into each thread's `sandboxMode`/`approvalPolicy`.
  *
- * @module dsh-loop-engine/engine-codex/agent
+ * @module dsh-agent-hub/engine-codex/agent
  */
 import type { Agent, AgentCancelCause, AgentOptions, AgentStatus, CancelOptions, InboxTarget } from '@deepseek-ai/dsh-agent';
 import { Inbox } from '@deepseek-ai/dsh-agent';

@@ -18,7 +18,7 @@
  * So the record lives in a plugin-owned sidecar keyed by session id, written
  * with the same atomic temp+rename discipline as the managed patch file.
  *
- * @module dsh-loop-engine/engine-record
+ * @module dsh-agent-hub/engine-record
  */
 
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'

@@ -5,7 +5,7 @@
  * folding them per query keeps the Claude Code driver consistent with the
  * permission preset the web surface shows, including mid-session switches.
  *
- * @module dsh-loop-engine/engine-claude/permission
+ * @module dsh-agent-hub/engine-claude/permission
  */
 import type { PermissionEvent } from '../driver-core/permission-knobs.ts';
 /**

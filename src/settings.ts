@@ -8,7 +8,7 @@
  * client bundle (cross-plugin value imports go through cordis services, and
  * `settings-scope.ts` follows the same discipline).
  *
- * @module dsh-loop-engine/settings
+ * @module dsh-agent-hub/settings
  */
 
 import z from '@deepseek-ai/schemastery'

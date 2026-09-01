@@ -17,7 +17,7 @@
  * are cwd-dependent, and a global dsh registration would collide across
  * projects.
  *
- * @module dsh-loop-engine/commands
+ * @module dsh-agent-hub/commands
  */
 import type { UserMessage } from '@deepseek-ai/dsh-session';
 /** Minimal shape of a DSH command definition (avoiding a direct peer dep on @deepseek-ai/dsh-commands). */

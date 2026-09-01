@@ -15,7 +15,7 @@ import { build } from 'esbuild'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
-const PACKAGE_ID = '@vidge/dsh-loop-engine'
+const PACKAGE_ID = '@vidge/dsh-agent-hub'
 
 /** Run a command and inherit its streams; exit on failure. */
 function run(command, args) {

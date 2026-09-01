@@ -13,7 +13,7 @@
  *     callback, so interactive approval can only become a rejection);
  *   - anything else fails closed → `read-only`.
  *
- * @module dsh-loop-engine/engine-pi/permission
+ * @module dsh-agent-hub/engine-pi/permission
  */
 import type { PermissionEvent } from '../driver-core/permission-knobs.ts';
 import type { PiSandboxMode } from './types.ts';

@@ -3,7 +3,7 @@
  * `codex app-server` as a child process, sends JSON-RPC 2.0 requests over
  * stdin, and reads newline-delimited JSON responses/notifications from stdout.
  *
- * @module dsh-loop-engine/engine-codex/appserver/client
+ * @module dsh-agent-hub/engine-codex/appserver/client
  */
 import type { InitializeResult, ThreadResumeParams, ThreadStartParams, ThreadStartResult, TurnInterruptParams, TurnStartParams, TurnStartResult } from './types.ts';
 /** Callback for receiving server notifications. */

@@ -1,7 +1,7 @@
 /**
  * Loop engine selection store: the durable settings scope is the transport,
  * and the store publishes a render-safe snapshot plus the write path.
- * @module dsh-loop-engine/client/store
+ * @module dsh-agent-hub/client/store
  */
 import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client';
 import { type SnapshotStore } from '@deepseek-ai/dsh-client-store';

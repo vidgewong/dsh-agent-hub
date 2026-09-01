@@ -1,7 +1,7 @@
 /**
  * Public types of the Claude Code loop driver. Types only — no runtime code.
  *
- * @module dsh-loop-engine/engine-claude/types
+ * @module dsh-agent-hub/engine-claude/types
  */
 import type { PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 /** Claude Code permission modes that never wait for a human response. */

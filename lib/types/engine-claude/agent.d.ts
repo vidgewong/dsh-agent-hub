@@ -4,7 +4,7 @@
  * tools, and permissions; the durable session log remains the source of truth
  * and the query prompt is a pure serialization of it.
  *
- * @module dsh-loop-engine/engine-claude/agent
+ * @module dsh-agent-hub/engine-claude/agent
  */
 import type { Agent, AgentCancelCause, AgentOptions, AgentStatus, CancelOptions, InboxTarget } from '@deepseek-ai/dsh-agent';
 import { Inbox } from '@deepseek-ai/dsh-agent';

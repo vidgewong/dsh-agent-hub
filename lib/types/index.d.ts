@@ -19,7 +19,7 @@
  * engine-independent: it disables the base bundle's `agent-loop` row so this
  * plugin owns the slot in every configuration.
  *
- * @module dsh-loop-engine
+ * @module dsh-agent-hub
  */
 import { Context, type Fiber } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';

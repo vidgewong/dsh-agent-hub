@@ -6,7 +6,7 @@
  * loader — while this decision is pure and worth a regression test of its own.
  * It has no imports so the browser bundle can take it as-is.
  *
- * @module dsh-loop-engine/client/session-location
+ * @module dsh-agent-hub/client/session-location
  */
 
 /** The subset of a session summary this decision reads. */

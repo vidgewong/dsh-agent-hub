@@ -21,7 +21,7 @@
  * {@link shadowSystemPrompt} resolves the second collision the same way, for
  * the prompt variables every engine constructor registers under the same names.
  *
- * @module dsh-loop-engine/router
+ * @module dsh-agent-hub/router
  */
 
 import type { Context } from '@deepseek-ai/cordis'

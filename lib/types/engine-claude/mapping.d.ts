@@ -4,7 +4,7 @@
  * event payloads the driver appends inside its current step, so the mapping
  * stays unit-testable without any SDK process.
  *
- * @module dsh-loop-engine/engine-claude/mapping
+ * @module dsh-agent-hub/engine-claude/mapping
  */
 import type { BetaMessage, BetaRawMessageStreamEvent, BetaUsage } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs';
 import type { MessageParam } from '@anthropic-ai/sdk/resources';

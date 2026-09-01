@@ -4,7 +4,7 @@
  * `CLAUDE.md` file, using the same YAML-frontmatter + markdown format as DSH
  * skills.
  *
- * @module dsh-loop-engine/skills
+ * @module dsh-agent-hub/skills
  */
 
 import { readFile, readdir, stat } from 'node:fs/promises'

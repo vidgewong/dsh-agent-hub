@@ -1,11 +1,11 @@
 {
-  "name": "@vidge/dsh-loop-engine",
-  "description": "Fork of dsh-loop-engine with auto-inherited LLM credentials (Bedrock/Vertex/Anthropic) and cordis 4.0.1 compatibility fix",
-  "version": "1.2.0",
+  "name": "@vidge/dsh-agent-hub",
+  "description": "Per-session agent loop engine router for DSH — run Claude Code, Codex, pi, or the in-process loop per session, all on DSH's unified session, LLM, and tracing substrate",
   "publishConfig": {
     "access": "public"
   },
-  "repository": "github:vidgewong/dsh-loop-engine",
+  "version": "0.1.0-rc1",
+  "repository": "github:vidgewong/dsh-agent-hub",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -26,6 +26,8 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "LICENSE",
+    "README.md",
     "lib/index.js",
     "lib/invariant.js",
     "lib/client.js",

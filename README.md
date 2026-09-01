@@ -1,59 +1,132 @@
-# dsh-loop-engine
+# dsh-agent-hub
 
-[![npm version](https://img.shields.io/npm/v/@vidge/dsh-loop-engine?color=cb3837)](https://www.npmjs.com/package/@vidge/dsh-loop-engine)
+[![npm version](https://img.shields.io/npm/v/@vidge/dsh-agent-hub?color=cb3837)](https://www.npmjs.com/package/@vidge/dsh-agent-hub)
 
-Switch the agent loop engine of **dsh web** the same way you switch a model: a
-"Loop engine" dropdown in Settings chooses which driver runs your agents — the
-built-in in-process loop, the Claude Code CLI, the Codex CLI, or the Pi CLI —
-without changing anything in the main repository.
+Run any agent loop engine on **dsh** — the built-in in-process loop, Claude
+Code, Codex, or Pi — **chosen per session**, all sharing dsh's own session
+store, message format, model routing, and tracing.
+
+Pick an engine the way you pick a model: in the composer, when you start a
+session. The session you are in keeps running on the engine it was created
+with. No restart, no global switch, no interrupted work.
+
+## Why a hub
+
+dsh admits exactly one `AgentFactory` for the whole process. That single slot
+is what forced every earlier approach to be a *global* choice: to run Claude
+Code you had to disable the base loop, and every session in the profile moved
+with you.
+
+This plugin takes that slot and turns it into a router. It holds one factory
+per engine — including dsh's own in-process loop, mounted as a first-class
+engine rather than replaced — and dispatches each `createAgent` / `resume` call
+to the engine that session belongs to.
+
+```
+dsh harness  (session · llm · tracing · model routing)
+      │
+      │  the one AgentFactory slot
+      ▼
+ LoopEngineRouter
+      ├── in-process   → @deepseek-ai/dsh-agent-loop  (hosted, not replaced)
+      ├── claude-code  → Claude Agent SDK
+      ├── codex        → codex app-server
+      └── pi           → pi --mode rpc
+```
+
+Everything above the router stays dsh's. Each engine's native output is
+translated into dsh's `Message` / `ContentBlock` / `StreamChunk` types, so
+sessions from different engines are stored, streamed, resumed, and traced
+identically.
+
+### Engine affinity is durable
+
+A session's engine is recorded when it is created and travels with it. Resuming
+a session restores it to the engine that produced its history — not to whatever
+is currently selected. This matters because engine session logs carry different
+provenance (a Codex-driven session records `provider = 'codex'`), and replaying
+that history under another engine would hand the model a transcript it cannot
+act on.
+
+Forked sessions and subagents inherit the parent's engine.
 
 ## Install
 
 ```sh
-dsh plugin --profile web add @vidge/dsh-loop-engine
+dsh plugin --profile web add @vidge/dsh-agent-hub
 ```
 
-Restart `dsh web`, then open **Settings → Loop engine**.
+Restart `dsh web` once after installing. After that, engine selection is
+runtime state — switching never requires a restart again.
 
-> Switching engines rewrites a small managed block in `cordis.patch.yml`.
-> Everything else you wrote in that file is preserved; only the plugin's own
-> span changes.
+> Installing writes a small managed block into the profile's
+> `cordis.patch.yml`, disabling the bundle's own `agent-loop` row so the router
+> can take the factory slot and re-mount that loop itself. Everything else in
+> that file is preserved byte for byte.
 
 ### Requirements
 
-- For the Claude Code engine: the Claude Code CLI installed and logged in on
-  the host.
-- For the Codex engine: authenticated either via `codex login` on the host or a
-  `CODEX_API_KEY` environment entry.
-- For the Pi engine: authenticated the way `pi` expects (its own
-  `~/.pi/agent/auth.json` or the provider's API-key environment variable such as
-  `ANTHROPIC_API_KEY`).
+Only for the engines you actually use:
+
+- **Claude Code** — the Claude Code CLI installed on the host. Credentials are
+  derived from dsh's own LLM provider configuration (see below); a CLI login is
+  a fallback, not a requirement.
+- **Codex** — authenticated via `codex login`, or a `CODEX_API_KEY` entry.
+- **Pi** — authenticated the way `pi` expects: its own `~/.pi/agent/auth.json`,
+  or the provider's API-key environment variable.
+
+The in-process engine needs nothing beyond dsh itself.
 
 ## Usage
 
-1. Pick an engine in **Settings → Loop engine** — `in-process` (default),
-   `claude-code`, `codex`, or `pi` — then restart `dsh web`.
-2. To return to the default, pick **In-process** and restart again.
-3. To remove the plugin: `dsh plugin --profile web remove @vidge/dsh-loop-engine`, then
-   restart `dsh web`.
+Choose an engine in the composer when starting a session. To change engines,
+start a new session — the current one keeps its engine, and anything still
+running on it is undisturbed.
 
-### Engine notes
+**Settings → Loop engine** sets the default for new sessions and controls
+whether the composer picker is shown.
 
-- The Claude Code driver runs one SDK query per step; its slash commands are
+To remove the plugin:
+
+```sh
+dsh plugin --profile web remove @vidge/dsh-agent-hub
+```
+
+Then restart `dsh web`.
+
+## Model and credential routing
+
+For the Claude Code engine, the child process's provider environment is derived
+from dsh's own LLM configuration rather than inherited from the shell that
+launched the host. The selected model names a provider route; the plugin reads
+that route's endpoint from `llm-pi-ai` settings, resolves its key through dsh's
+`credentials` service, and states the result as the environment variables the
+Agent SDK understands — Bedrock (including behind a corporate gateway) and
+native Anthropic endpoints.
+
+This is why a dsh started from a desktop launcher works: it inherits no
+provider variables, but it does not need to. dsh already knows the answer.
+
+When a route cannot be derived — an OpenAI-protocol provider with no Claude
+Code equivalent, an unset credential — the plugin falls back to inherited
+environment and reports what the child was actually pointed at.
+
+## Engine notes
+
+- **Claude Code** runs one SDK query per dsh step. Its slash commands are
   bridged into the web menu (built-ins plus user-level `~/.claude/commands/`)
   and forwarded to the engine, which expands them natively. Project-level
-  `.claude/commands/` files stay engine-side and also work typed directly.
-- The Codex driver runs `codex app-server` and has no interactive tool
-  approval — permissions come from the session's `sandboxMode` +
-  `approvalPolicy`. Its `AGENTS.md` instruction files are surfaced through the
-  dsh skill-injection seam across every directory from the session cwd up to
-  the git root, plus `~/.codex/AGENTS.md`.
-- The Pi driver runs `pi --mode rpc`; Pi has no permission system, so the whole
-  child is sandboxed through the dsh subprocess service (default `read-only`).
-  Its context files (`AGENTS.md`/`CLAUDE.md` with `AGENTS.override.md`
+  `.claude/commands/` files stay engine-side and work when typed directly.
+- **Codex** runs `codex app-server` and has no interactive tool approval —
+  permissions come from the session's `sandboxMode` + `approvalPolicy`. Its
+  `AGENTS.md` files are surfaced through the dsh skill-injection seam across
+  every directory from the session cwd up to the git root, plus
+  `~/.codex/AGENTS.md`.
+- **Pi** runs `pi --mode rpc`. Pi has no permission system, so the whole child
+  is sandboxed through the dsh subprocess service (default `read-only`). Its
+  context files (`AGENTS.md` / `CLAUDE.md`, with `AGENTS.override.md`
   preferred, plus the user-level file under the pi config dir) and its
-  `skills/` catalogs (`~/.pi/agent/skills/` and `.pi/skills/`) are surfaced
-  through the dsh skill-injection seam.
+  `skills/` catalogs are surfaced through the same seam.
 
 ## License
 

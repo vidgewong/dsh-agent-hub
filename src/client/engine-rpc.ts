@@ -11,7 +11,7 @@
  * `undefined` rather than throwing when it is absent — the composer then falls
  * back to a read-only label.
  *
- * @module dsh-loop-engine/client/engine-rpc
+ * @module dsh-agent-hub/client/engine-rpc
  */
 
 // Imported from `../namespace.ts`, not `../settings.ts`: this is a *value*
