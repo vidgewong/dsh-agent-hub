@@ -1,26 +1,59 @@
 /**
- * Composer loop-engine picker: a compact dropdown registered at the
- * `conversation.input.right` seat, so it sits immediately left of the model
- * select in the composer's tool row. The engine is a deployment-level choice,
- * so this surface shares the same settings-backed {@link LoopEngineStore} as
- * the settings section and the header badge — a change in any one is what the
- * others show next. Switching still asks for confirmation first (it interrupts
- * sessions still running on the previous engine) and reloads the page once the
- * commit lands, matching the settings section's semantics.
+ * Composer loop-engine control, registered at the `conversation.input.right`
+ * seat so it sits immediately left of the model select in the composer's tool
+ * row.
  *
- * Styling is token-driven inline styles like the badge and section (the
- * client-module bundle is esbuild-built without a CSS loader).
+ * It shows **this session's actual engine**, read from the node half over the
+ * plugin's own RPC channel. That distinction is the whole point of this
+ * component. A session's engine is chosen inside `createAgent`, which the
+ * harness fires eagerly when a session is *opened* — before a user can click
+ * anything — so a control backed by the settings value would name "the last
+ * thing picked anywhere" while the session ran something else. That was a real,
+ * reported defect: the composer read "In-process engine" while Claude Code
+ * answered.
+ *
+ * The seat never hides itself over a failed read. When the engine cannot be
+ * resolved it says so and stays clickable: the picker is the only route to
+ * another engine, so removing it would strand the user with no control and no
+ * explanation — which is precisely how this looked when the channel silently
+ * failed to register.
+ *
+ * Because the engine is fixed before the control is reachable, picking a
+ * different one cannot change this session. It instead **creates a new one**:
+ * the seat mints a session id, reserves the engine for it over the channel, and
+ * asks the host to create exactly that id — bypassing `connectWorkspace`, which
+ * would hand back the current blank session and defeat the purpose. The
+ * abandoned blank session is left alone; discarding a session is the user's
+ * call, not the picker's.
+ *
+ * Styling is token-driven inline styles like the section (the client-module
+ * bundle is esbuild-built without a CSS loader).
  * @module dsh-loop-engine/client/composer
  */
 import { type JSX } from 'react';
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store';
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
 import type { LoopEngineStore, LoopEngineState } from './store.ts';
+import type { EngineRpc } from './engine-rpc.ts';
+import type { LoopEngineId } from '../settings.ts';
 import type { en } from './locales.ts';
+/** Creates a session on a caller-chosen id and brings it to the foreground. */
+export interface SessionSwitcher {
+    /**
+     * Create a session carrying a specific engine, and open it.
+     * @param engine - engine the new session must run on.
+     * @returns whether a new session was created and opened.
+     */
+    startSessionOn(engine: LoopEngineId): Promise<boolean>;
+}
 /** Injected dependencies of {@link LoopEngineComposerSelect} (slot `inject`). */
 export interface LoopEngineComposerSelectInjected {
-    /** The selection store (loaded on mount, refreshed by scope pushes). */
+    /** The settings store, for the composer-visibility toggle and the default engine. */
     controller: LoopEngineStore;
+    /** Reads a session's true engine from the node half. */
+    rpc: EngineRpc;
+    /** Creates and opens a session bound to a chosen engine. */
+    switcher: SessionSwitcher;
     hooks: {
         /** Engine snapshot bound by the UI renderer as useSnapshot. */
         snapshot: SnapshotStore<LoopEngineState>;
@@ -31,10 +64,10 @@ export interface LoopEngineComposerSelectInjected {
 /** Props delivered by the slot outlet (the renderer erases the share boundary). */
 export type LoopEngineComposerSelectProps = Partial<InjectFace<LoopEngineComposerSelectInjected>>;
 /**
- * Render the composer's loop-engine dropdown. Hides until the settings scope
- * settles, so the composer never flashes a provisional engine.
+ * Render the composer's loop-engine seat.
  * @param props - composed slot props.
- * @returns the picker, or null while the engine is unknown.
+ * @returns the control naming this session's engine, or null when the settings
+ *   toggle hides it.
  */
 export declare function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): JSX.Element | null;
 //# sourceMappingURL=LoopEngineComposerSelect.d.ts.map

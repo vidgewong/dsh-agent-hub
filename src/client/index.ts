@@ -11,21 +11,54 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+// Type-only: pulls ui-conversation's SlotMap merge, which declares the
+// `conversation.input.right` seat the composer picker registers at.
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { LoopEngineSection } from './LoopEngineSection.tsx'
 import type { LoopEngineSectionInjected } from './LoopEngineSection.tsx'
-import { LoopEngineBadge } from './LoopEngineBadge.tsx'
-import type { LoopEngineBadgeInjected } from './LoopEngineBadge.tsx'
 import { LoopEngineComposerSelect } from './LoopEngineComposerSelect.tsx'
-import type { LoopEngineComposerSelectInjected } from './LoopEngineComposerSelect.tsx'
+import type { LoopEngineComposerSelectInjected, SessionSwitcher } from './LoopEngineComposerSelect.tsx'
+import { EngineRpc, type ConnectionLike } from './engine-rpc.ts'
+import { sessionLocation } from './session-location.ts'
+import type { SessionListLike, WorkspaceViewLike } from './session-location.ts'
 import { LoopEngineStore, decodeLoopEngine } from './store.ts'
 import { en, zh, type LoopEngineKey } from './locales.ts'
 import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../namespace.ts'
-import type { LoopEngineSettings } from '../settings.ts'
+import type { LoopEngineId, LoopEngineSettings } from '../settings.ts'
 
 export type { LoopEngineSectionInjected, LoopEngineSectionProps } from './LoopEngineSection.tsx'
-export type { LoopEngineBadgeInjected, LoopEngineBadgeProps } from './LoopEngineBadge.tsx'
-export type { LoopEngineComposerSelectInjected, LoopEngineComposerSelectProps } from './LoopEngineComposerSelect.tsx'
+export type { LoopEngineComposerSelectInjected, LoopEngineComposerSelectProps, SessionSwitcher } from './LoopEngineComposerSelect.tsx'
 export type { LoopEngineState } from './store.ts'
+
+/**
+ * The client session service this plugin drives, declared structurally so the
+ * bundle needs no value import from the session controller.
+ *
+ * `create` is called with an explicit `sessionId` on purpose: it is the only
+ * way to know the id *before* the session exists, which is what lets the engine
+ * be reserved for it. Going through `uiWorkspace.connectWorkspace` instead
+ * would return the current blank session unchanged.
+ *
+ * `workspaceId` and `cwd` are mutually exclusive on the wire — the host rejects
+ * a request carrying both with `gateway/bad-request` — and they are not
+ * interchangeable: only the `workspaceId` branch runs `workspace.attachSession`.
+ * A session created with a bare `cwd` therefore belongs to no workspace, which
+ * is what makes the UI ask the user to pick one all over again.
+ */
+interface SessionsLike {
+  create(opts: { workspaceId?: string; cwd?: string; sessionId?: string }): Promise<string>
+  open(id: string): void
+  list: { getSnapshot(): SessionListLike }
+}
+
+/**
+ * The workspace snapshot this plugin reads to find the current session's
+ * workspace. Membership is held by the workspace, not the session, so the
+ * lookup is a scan over `items` — the same one `uiWorkspace.startSession` does.
+ */
+interface WorkspacesLike {
+  list: { getSnapshot(): { items: readonly WorkspaceViewLike[] } }
+}
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -74,36 +107,56 @@ export function apply(ctx: ClientContext): void {
     inject: injected,
   }, LoopEngineSection))
 
-  // The conversation header badge shares the same controller: the engine is a
-  // deployment choice, so one snapshot feeds the settings picker and the
-  // per-session chip. Registered in the conversation scope so it exists only
-  // where a session header is rendered.
-  ctx.inject(['slots', 'conversation'], (scope: ClientContext) => {
-    const badgeInjected = (): LoopEngineBadgeInjected => ({
-      hooks: { snapshot: controller.store },
-      t,
-    })
-    scope.effect(() => {
-      return scope.slots.register({
-        name: 'conversation.session.header.actions',
-        id: 'loop-engine',
-        // Static session context precedes interactive actions (agent-preset's
-        // label sits at -10, so the engine chip leads the header).
-        order: -20,
-        locale: NS,
-        inject: badgeInjected,
-      }, LoopEngineBadge)
-    }, 'loop-engine: session header engine badge')
-  })
+  // The composer's loop-engine control: registered at the tool-row seat beside
+  // the model select. It names the engine the open session is *actually* on,
+  // read from the node half over the plugin's own RPC channel, and switching it
+  // creates a new session rather than pretending to change this one — a
+  // session's engine is fixed inside `createAgent`, which the harness fires
+  // eagerly at session-open.
+  //
+  // `connection` is injected here rather than read off the root context: a bare
+  // `ctx.get` at apply time can run before the connection plugin provides the
+  // service, and would then pin an undefined RPC for the life of the page. It
+  // is not in the plugin-level `inject` because the settings section must still
+  // mount on a profile that has no Connection.
+  //
+  // There is deliberately no session-header badge: the composer seat already
+  // carries the per-session engine, and the settings value it would otherwise
+  // read means only "the default for sessions that pick nothing".
+  ctx.inject(['slots', 'conversation', 'connection'], (scope: ClientContext) => {
+    const rpc = new EngineRpc(scope.get('connection') as ConnectionLike | undefined)
 
-  // The composer's loop-engine picker: registered at the tool-row seat beside
-  // the model select so the engine is switchable in the chat page, not only in
-  // settings. Same controller/store, so all three surfaces stay in sync. The
-  // dependency on `conversation` (like the header badge) ensures ui-conversation
-  // has declared the `conversation.input.right` seat before this entry lands.
-  ctx.inject(['slots', 'conversation'], (scope: ClientContext) => {
+    const switcher: SessionSwitcher = {
+      async startSessionOn(engine: LoopEngineId): Promise<boolean> {
+        const sessions = scope.get('sessions') as SessionsLike | undefined
+        if (sessions === undefined) return false
+        // Place the new session where the user already is. Workspace
+        // membership is the one that matters, and it is not implied by the
+        // directory — see `sessionLocation` for why passing `cwd` alone is what
+        // made the UI ask for a workspace a second time.
+        const location = sessionLocation(
+          sessions.list.getSnapshot(),
+          (scope.get('workspaces') as WorkspacesLike | undefined)?.list.getSnapshot().items,
+        )
+        const sessionId = crypto.randomUUID()
+        // Order matters: the host resolves the reservation inside `createAgent`,
+        // which runs during `create`. Reserving afterwards would be too late.
+        if (!await rpc.bind(sessionId, engine)) return false
+        try {
+          await sessions.create({ sessionId, ...location })
+        } catch (error: unknown) {
+          console.warn('loop-engine: could not start a session on', engine, error)
+          return false
+        }
+        sessions.open(sessionId)
+        return true
+      },
+    }
+
     const composerInjected = (): LoopEngineComposerSelectInjected => ({
       controller,
+      rpc,
+      switcher,
       hooks: { snapshot: controller.store },
       t,
     })

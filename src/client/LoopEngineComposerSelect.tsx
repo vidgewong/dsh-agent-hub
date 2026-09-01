@@ -1,35 +1,66 @@
 /**
- * Composer loop-engine picker: a compact dropdown registered at the
- * `conversation.input.right` seat, so it sits immediately left of the model
- * select in the composer's tool row. The engine is a deployment-level choice,
- * so this surface shares the same settings-backed {@link LoopEngineStore} as
- * the settings section and the header badge — a change in any one is what the
- * others show next. Switching still asks for confirmation first (it interrupts
- * sessions still running on the previous engine) and reloads the page once the
- * commit lands, matching the settings section's semantics.
+ * Composer loop-engine control, registered at the `conversation.input.right`
+ * seat so it sits immediately left of the model select in the composer's tool
+ * row.
  *
- * Styling is token-driven inline styles like the badge and section (the
- * client-module bundle is esbuild-built without a CSS loader).
+ * It shows **this session's actual engine**, read from the node half over the
+ * plugin's own RPC channel. That distinction is the whole point of this
+ * component. A session's engine is chosen inside `createAgent`, which the
+ * harness fires eagerly when a session is *opened* — before a user can click
+ * anything — so a control backed by the settings value would name "the last
+ * thing picked anywhere" while the session ran something else. That was a real,
+ * reported defect: the composer read "In-process engine" while Claude Code
+ * answered.
+ *
+ * The seat never hides itself over a failed read. When the engine cannot be
+ * resolved it says so and stays clickable: the picker is the only route to
+ * another engine, so removing it would strand the user with no control and no
+ * explanation — which is precisely how this looked when the channel silently
+ * failed to register.
+ *
+ * Because the engine is fixed before the control is reachable, picking a
+ * different one cannot change this session. It instead **creates a new one**:
+ * the seat mints a session id, reserves the engine for it over the channel, and
+ * asks the host to create exactly that id — bypassing `connectWorkspace`, which
+ * would hand back the current blank session and defeat the purpose. The
+ * abandoned blank session is left alone; discarding a session is the user's
+ * call, not the picker's.
+ *
+ * Styling is token-driven inline styles like the section (the client-module
+ * bundle is esbuild-built without a CSS loader).
  * @module dsh-loop-engine/client/composer
  */
 
-import { useRef, useState, type CSSProperties, type JSX } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type JSX } from 'react'
 import {
-  Button,
   IconChevronDownOutline14,
   Menu,
-  Modal,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { LoopEngineStore, LoopEngineState } from './store.ts'
+import type { EngineRpc } from './engine-rpc.ts'
 import type { LoopEngineId } from '../settings.ts'
 import type { en } from './locales.ts'
 
+/** Creates a session on a caller-chosen id and brings it to the foreground. */
+export interface SessionSwitcher {
+  /**
+   * Create a session carrying a specific engine, and open it.
+   * @param engine - engine the new session must run on.
+   * @returns whether a new session was created and opened.
+   */
+  startSessionOn(engine: LoopEngineId): Promise<boolean>
+}
+
 /** Injected dependencies of {@link LoopEngineComposerSelect} (slot `inject`). */
 export interface LoopEngineComposerSelectInjected {
-  /** The selection store (loaded on mount, refreshed by scope pushes). */
+  /** The settings store, for the composer-visibility toggle and the default engine. */
   controller: LoopEngineStore
+  /** Reads a session's true engine from the node half. */
+  rpc: EngineRpc
+  /** Creates and opens a session bound to a chosen engine. */
+  switcher: SessionSwitcher
   hooks: {
     /** Engine snapshot bound by the UI renderer as useSnapshot. */
     snapshot: SnapshotStore<LoopEngineState>
@@ -41,7 +72,23 @@ export interface LoopEngineComposerSelectInjected {
 /** Props delivered by the slot outlet (the renderer erases the share boundary). */
 export type LoopEngineComposerSelectProps = Partial<InjectFace<LoopEngineComposerSelectInjected>>
 
-type ComposerFace = InjectFace<LoopEngineComposerSelectInjected>
+/**
+ * The slice of the owner's `InputZone.session` this seat reads. `sessionId`
+ * identifies the session whose engine to resolve; the seat has no other route
+ * to it.
+ */
+interface SessionFacts {
+  readonly sessionId: string
+}
+
+/**
+ * The rendered face. The renderer spreads the owner's props (`session`, from
+ * `InputZone`) over the injected ones, so the session snapshot arrives as a
+ * plain prop and needs no hook.
+ */
+type ComposerFace = InjectFace<LoopEngineComposerSelectInjected> & {
+  session?: SessionFacts
+}
 
 const ENGINE_OPTIONS: readonly { value: LoopEngineId; key: keyof typeof en }[] = [
   { value: 'in-process', key: 'engineInProcess' },
@@ -79,99 +126,128 @@ const trigger: CSSProperties = {
   cursor: 'pointer',
 }
 
-const triggerDisabled: CSSProperties = { ...trigger, opacity: 0.5, cursor: 'default' }
+const triggerBusy: CSSProperties = { ...trigger, opacity: 0.5, cursor: 'default' }
 
-const confirmBody: CSSProperties = {
-  margin: 0,
-  fontSize: 13,
-  lineHeight: 1.55,
+/**
+ * The read-only seat, used when no Connection is available to switch through.
+ * No border or button affordance — it must not invite a click that cannot do
+ * anything.
+ */
+const frozen: CSSProperties = {
+  boxSizing: 'border-box',
+  display: 'inline-flex',
+  alignItems: 'center',
+  padding: '4px 8px',
   color: 'var(--dsw-alias-label-secondary)',
+  font: 'inherit',
+  fontSize: 12,
+  lineHeight: '20px',
+  whiteSpace: 'nowrap',
 }
 
 /**
- * Render the composer's loop-engine dropdown. Hides until the settings scope
- * settles, so the composer never flashes a provisional engine.
+ * Render the composer's loop-engine seat.
  * @param props - composed slot props.
- * @returns the picker, or null while the engine is unknown.
+ * @returns the control naming this session's engine, or null when the settings
+ *   toggle hides it.
  */
 export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): JSX.Element | null {
-  const { controller, useSnapshot, t } = props as ComposerFace
-  const { status, engine, showInComposer, writable } = useSnapshot((snapshot: LoopEngineState) => snapshot)
+  const { rpc, switcher, useSnapshot, session, t } = props as ComposerFace
+  const { status, showInComposer } = useSnapshot((snapshot: LoopEngineState) => snapshot)
   const [open, setOpen] = useState(false)
-  const [pending, setPending] = useState<LoopEngineId | null>(null)
+  const [busy, setBusy] = useState(false)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
 
-  // Hidden until the settings scope settles (no provisional engine), and
-  // again when the settings toggle clears the composer picker.
-  if (status !== 'ready' || !showInComposer) return null
+  // This session's true engine, from the node half's durable record. It stays
+  // `undefined` while the answer is outstanding and when it never arrives (an
+  // absent Connection, a channel that failed to register, a transport error);
+  // `resolving` separates those two so the seat can say which one it is.
+  const [engine, setEngine] = useState<LoopEngineId | undefined>(undefined)
+  const [resolving, setResolving] = useState(false)
+  const sessionId = session?.sessionId
+  useEffect(() => {
+    if (sessionId === undefined) {
+      setEngine(undefined)
+      setResolving(false)
+      return
+    }
+    const abort = new AbortController()
+    // Clear first: showing the previous session's engine against a new session
+    // id is exactly the lie this component exists to remove.
+    setEngine(undefined)
+    setResolving(true)
+    void rpc.resolve(sessionId, abort.signal).then((resolved) => {
+      if (abort.signal.aborted) return
+      setEngine(resolved)
+      setResolving(false)
+    })
+    return () => { abort.abort() }
+  }, [rpc, sessionId])
 
-  const disabled = !writable
-  const label = t(engineLabelKey(engine))
-  // The hint a user needs at a glance: what this control does (and, for the
-  // Claude Code engine, that the model seat in this session is inert).
-  const title = engine === 'claude-code' ? t('claudeModelNotice') : t('description')
+  // Hidden only when the settings toggle clears the seat, or before the
+  // settings scope has settled enough to know that. An unknown engine must NOT
+  // hide the control: the picker is how a user reaches another engine at all,
+  // and removing it on a failed read leaves them with no way to switch and no
+  // sign anything went wrong.
+  if (status === 'loading' || !showInComposer) return null
 
-  // Pick only stages the choice; the switch itself waits for confirmation.
+  // Three display states: the resolved engine, "still reading", and "could not
+  // read". The last two keep the picker live — creating a session on a chosen
+  // engine does not depend on knowing the current one.
+  const label = engine !== undefined
+    ? t(engineLabelKey(engine))
+    : t(resolving ? 'engineResolving' : 'engineUnknown')
+  const notice = engine === 'claude-code'
+    ? t('claudeModelNotice')
+    : engine === undefined && !resolving
+      ? t('engineUnknownNotice')
+      : t('switchCreatesSession')
+
+  // Without a Connection there is no way to reserve an engine for a new
+  // session, so the seat reports the current one and stops there.
+  if (!rpc.available) {
+    return (
+      <span style={frozen} title={t('boundNotice')}>
+        {label}
+      </span>
+    )
+  }
+
+  // Picking cannot change this session — its agent already exists — so it
+  // creates a new session on the chosen engine and switches to it.
   const onSelect = (next: string): void => {
     setOpen(false)
     const value = next as LoopEngineId
-    if (value === engine) return
-    setPending(value)
+    if (value === engine || busy) return
+    setBusy(true)
+    void switcher.startSessionOn(value).finally(() => { setBusy(false) })
   }
-  const confirmSwitch = (): void => {
-    const value = pending
-    setPending(null)
-    if (value !== null) {
-      void controller.setEngine(value).then((landed) => {
-        // Session views established under the previous engine's factory do not
-        // migrate: a committed switch reloads the page so every session
-        // re-attaches against the new composition.
-        if (landed) window.location.reload()
-      })
-    }
-  }
-  const cancelSwitch = (): void => { setPending(null) }
 
   return (
-    <>
-      <Menu
-        open={open}
-        onClose={() => { setOpen(false) }}
-        items={ENGINE_OPTIONS.map(option => ({ id: option.value, label: t(option.key) }))}
-        selectedId={engine}
-        onSelect={onSelect}
-        align="start"
-        portal
-        getAnchorRect={() => triggerRef.current?.getBoundingClientRect() ?? null}
-        anchor={(
-          <button
-            type="button"
-            ref={triggerRef}
-            aria-haspopup="menu"
-            aria-expanded={open}
-            disabled={disabled}
-            style={disabled ? triggerDisabled : trigger}
-            title={title}
-            onClick={() => { setOpen(!open) }}
-          >
-            {label}
-            <IconChevronDownOutline14 size={14} />
-          </button>
-        )}
-      />
-      <Modal
-        open={pending !== null}
-        onClose={cancelSwitch}
-        title={t('confirmTitle')}
-        footer={(
-          <>
-            <Button variant="outline" onClick={cancelSwitch}>{t('cancelAction')}</Button>
-            <Button variant="primary" onClick={confirmSwitch}>{t('confirmAction')}</Button>
-          </>
-        )}
-      >
-        <p style={confirmBody}>{t('confirmBody')}</p>
-      </Modal>
-    </>
+    <Menu
+      open={open}
+      onClose={() => { setOpen(false) }}
+      items={ENGINE_OPTIONS.map(option => ({ id: option.value, label: t(option.key) }))}
+      selectedId={engine}
+      onSelect={onSelect}
+      align="start"
+      portal
+      getAnchorRect={() => triggerRef.current?.getBoundingClientRect() ?? null}
+      anchor={(
+        <button
+          type="button"
+          ref={triggerRef}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          disabled={busy}
+          style={busy ? triggerBusy : trigger}
+          title={notice}
+          onClick={() => { setOpen(!open) }}
+        >
+          {label}
+          <IconChevronDownOutline14 size={14} />
+        </button>
+      )}
+    />
   )
 }

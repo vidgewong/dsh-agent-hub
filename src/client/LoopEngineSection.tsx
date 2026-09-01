@@ -1,23 +1,30 @@
 /**
- * Loop engine settings section component: one dropdown choosing the agent
- * loop engine, backed by the duplicated settings scope through the inject face.
- * Changing the engine asks for confirmation first, because the switch
- * interrupts sessions still running on the previous engine.
+ * Loop engine settings section component: one dropdown choosing the **default**
+ * agent loop engine, backed by the duplicated settings scope through the inject
+ * face.
+ *
+ * This is deliberately not a switch for "the current engine". A session's
+ * engine is fixed inside `createAgent`, which the harness fires eagerly when a
+ * session is opened, so nothing set here can reach a session that already
+ * exists. It applies to sessions created later that do not reserve an engine of
+ * their own — the composer seat is where a session's engine is chosen. That
+ * split mirrors the harness's own `agentPreset`: a per-session control, plus a
+ * settings entry that only sets the default.
+ *
+ * Picking commits immediately; there is no confirmation dialog and no
+ * `location.reload()`, because every engine is resident behind one router.
  *
  * Styling is token-driven like the rest of the settings shell (`--dsw-*`
- * aliases), with the picker rendered through the shared `Menu` primitive and
- * the confirmation through `Modal`. The client-module bundle is esbuild-built
- * without a CSS loader, so the section shell uses token-based inline styles
- * instead of a CSS module.
+ * aliases), with the picker rendered through the shared `Menu` primitive. The
+ * client-module bundle is esbuild-built without a CSS loader, so the section
+ * shell uses token-based inline styles instead of a CSS module.
  * @module dsh-loop-engine/client
  */
 
 import { useId, useRef, useState, type CSSProperties, type JSX } from 'react'
 import {
-  Button,
   IconChevronDownOutline14,
   Menu,
-  Modal,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
@@ -130,19 +137,11 @@ const toggleCheckbox: CSSProperties = {
   cursor: 'pointer',
 }
 
-const confirmBody: CSSProperties = {
-  margin: 0,
-  fontSize: 13,
-  lineHeight: 1.55,
-  color: 'var(--dsw-alias-label-secondary)',
-}
-
-/** Render the engine dropdown plus the interrupt notice and the switch confirmation. */
+/** Render the engine dropdown plus the binding notice and the composer toggle. */
 export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
   const { controller, useSnapshot, t } = props as SectionFace
   const { status, engine, showInComposer, writable } = useSnapshot((snapshot: LoopEngineState) => snapshot)
   const [open, setOpen] = useState(false)
-  const [pending, setPending] = useState<LoopEngineId | null>(null)
   const navId = useId()
   const triggerRef = useRef<HTMLButtonElement | null>(null)
 
@@ -158,26 +157,14 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
 
   const disabled = status === 'saving' || !writable
   const label = t(engineLabelKey(engine))
-  // Pick only stages the choice; the switch itself waits for confirmation.
+  // Commits straight away: the choice binds at the next session's creation, so
+  // there is nothing running for it to interrupt.
   const onSelect = (next: string): void => {
     setOpen(false)
     const value = next as LoopEngineId
     if (value === engine) return
-    setPending(value)
+    void controller.setEngine(value)
   }
-  const confirmSwitch = (): void => {
-    const value = pending
-    setPending(null)
-    if (value !== null) {
-      void controller.setEngine(value).then((landed) => {
-        // Session views established under the previous engine's factory do
-        // not migrate: a committed switch reloads the page so every session
-        // re-attaches against the new composition.
-        if (landed) window.location.reload()
-      })
-    }
-  }
-  const cancelSwitch = (): void => { setPending(null) }
 
   return (
     <section aria-labelledby={navId} style={shell}>
@@ -219,19 +206,6 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
         />
         {t('showInComposerLabel')}
       </label>
-      <Modal
-        open={pending !== null}
-        onClose={cancelSwitch}
-        title={t('confirmTitle')}
-        footer={(
-          <>
-            <Button variant="outline" onClick={cancelSwitch}>{t('cancelAction')}</Button>
-            <Button variant="primary" onClick={confirmSwitch}>{t('confirmAction')}</Button>
-          </>
-        )}
-      >
-        <p style={confirmBody}>{t('confirmBody')}</p>
-      </Modal>
     </section>
   )
 }

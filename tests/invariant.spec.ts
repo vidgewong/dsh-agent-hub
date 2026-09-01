@@ -7,8 +7,12 @@
 import { describe, expect, it } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { apply as applyInvariant } from '../src/invariant.ts'
-import { LOOP_ENGINE_IDS } from '../src/settings.ts'
-import { applyManagedBlock, currentEngineOf } from '../src/patch-manager.ts'
+import {
+  applyManagedBlock,
+  hasManagedBlock,
+  MANAGED_BLOCK_BEGIN,
+  MANAGED_BLOCK_END,
+} from '../src/patch-manager.ts'
 
 /** Minimal invariant registry: runs the installer synchronously at register. */
 class FakeInvariants extends Service {
@@ -53,10 +57,16 @@ describe('loop-engine invariant companion', () => {
     // Independent restatement so a silent invariant regression is caught by
     // both the registration run and this explicit probe.
     const seed = '# dsh profile patch layer\n'
-    for (const engine of LOOP_ENGINE_IDS) {
-      const applied = applyManagedBlock(seed, engine)
-      const reborn = applyManagedBlock(applied, currentEngineOf(applied))
-      expect(reborn).toBe(applied)
-    }
+    const applied = applyManagedBlock(seed)
+    expect(applyManagedBlock(applied)).toBe(applied)
+    expect(hasManagedBlock(applied)).toBe(true)
+    // The block is permanent and always frees the slot for the router.
+    expect(applied).toContain('- id: agent-loop')
+    expect(applied).toContain('disabled: true')
+
+    // A block from the era when the marker encoded the selected engine must
+    // upgrade in place, not accumulate a second block.
+    const legacy = `${seed}\n${MANAGED_BLOCK_BEGIN}: codex --\n- id: agent-loop\n  disabled: true\n${MANAGED_BLOCK_END}\n`
+    expect(applyManagedBlock(legacy)).toBe(applied)
   })
 })

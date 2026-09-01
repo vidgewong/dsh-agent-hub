@@ -1,11 +1,11 @@
 /**
- * Package-owned invariant companion for the loop engine selection.
+ * Package-owned invariant companion for the managed patch block.
  *
- * The plugin's owned relationship is the patch-manager round trip: rendering
- * a managed block for an engine and reading it back must produce the same
- * engine, and the `in-process` engine must render an absent block (so the base
- * bundle's `agent-loop` row stays mounted). The companion asserts both against
- * the pure transform, binding the writer's inverse to the reader directly.
+ * The plugin's owned relationship is that the managed block is a permanent
+ * fixed point: applying it is idempotent, it always yields the row that frees
+ * the AgentFactory slot for this plugin's router, and it upgrades a legacy
+ * engine-tagged block from the era when the block encoded the selection. The
+ * companion asserts these against the pure transform.
  *
  * @module dsh-loop-engine/invariant
  */

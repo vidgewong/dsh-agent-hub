@@ -12,11 +12,9 @@
  */
 import z from '@deepseek-ai/schemastery';
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings';
+import { type LoopEngineId } from './namespace.ts';
 export { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from './namespace.ts';
-/** The installed engine driving new Agent turns. */
-export declare const LOOP_ENGINE_IDS: readonly ["in-process", "claude-code", "codex", "pi"];
-/** Installed agent loop engine id. */
-export type LoopEngineId = (typeof LOOP_ENGINE_IDS)[number];
+export { LOOP_ENGINE_IDS, type LoopEngineId } from './namespace.ts';
 /** Stored and composed loop engine selection. */
 export interface LoopEngineSettings {
     /** The engine future Agents are created on. */

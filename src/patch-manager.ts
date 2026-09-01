@@ -2,34 +2,33 @@
  * Managed-block editing for a profile's `cordis.patch.yml`.
  *
  * The plugin owns one contiguous block inside the user's patch file, delimited
- * by a begin/end marker pair, and rewrites only that span on engine switches
- * — everything else the user wrote (other patches, their comments) survives
- * byte for byte. The block's content is the loader patch that takes the loop
- * engine over: it disables the base bundle's `agent-loop` row so this plugin's
- * factory (hosted by dsh-loop-engine) can register without colliding, because
- * the harness admits exactly one AgentFactory:
+ * by a begin/end marker pair, and rewrites only that span — everything else the
+ * user wrote (other patches, their comments) survives byte for byte. The
+ * block's content is the loader patch that takes the loop engine over: it
+ * disables the base bundle's `agent-loop` row so this plugin's factory can
+ * register without colliding, because the harness admits exactly one
+ * AgentFactory:
  *
- *   # -- dsh-loop-engine managed block: claude-code --
+ *   # -- dsh-loop-engine managed block --
  *   - id: agent-loop
  *     disabled: true
  *   # -- /dsh-loop-engine managed block --
  *
- * `in-process` renders an absent block (the base bundle's `agent-loop` row
- * stays active and supplies the factory), so switching back removes the span
- * entirely. Any other engine renders the same disable block, and the begin
- * marker carries the specific engine id (`# -- dsh-loop-engine managed block:
- * claude-code --`) so `currentEngineOf` can read which non-default engine owns
- * the slot from the file alone. All functions here are pure string transforms —
- * file I/O and durability live in the plugin's apply.
+ * The block is now PERMANENT and engine-independent. Under per-session routing
+ * this plugin always owns the slot — it registers a router that dispatches to
+ * whichever engine a session belongs to, and it hosts the base in-process loop
+ * itself as one of those engines. The block therefore no longer carries an
+ * engine name and no longer changes when the user picks a different engine;
+ * that choice is now runtime state, not boot state.
+ *
+ * All functions here are pure string transforms — file I/O and durability live
+ * in the plugin's apply.
  *
  * @module dsh-loop-engine/patch-manager
  */
 
-import type { LoopEngineId } from './settings.ts'
-import { LOOP_ENGINE_IDS } from './settings.ts'
-
 /** Begin marker of the plugin-managed span inside a profile patch file. */
-export const MANAGED_BLOCK_BEGIN = '# -- dsh-loop-engine managed block: '
+export const MANAGED_BLOCK_BEGIN = '# -- dsh-loop-engine managed block'
 
 /** End marker of the plugin-managed span inside a profile patch file. */
 export const MANAGED_BLOCK_END = '# -- /dsh-loop-engine managed block --'
@@ -37,11 +36,13 @@ export const MANAGED_BLOCK_END = '# -- /dsh-loop-engine managed block --'
 /** The block's trailing newline convention (one blank line before the end marker). */
 const END_MARKER_LINE = `${MANAGED_BLOCK_END}\n`
 
-/** Render the managed block for one engine; `in-process` returns the empty span. */
-export function renderManagedBlock(engine: LoopEngineId): string {
-  if (engine === 'in-process') return ''
+/**
+ * Render the permanent managed block. The plugin always owns the AgentFactory
+ * slot, so the base `agent-loop` row is always disabled.
+ */
+export function renderManagedBlock(): string {
   return [
-    `${MANAGED_BLOCK_BEGIN}${engine} --`,
+    `${MANAGED_BLOCK_BEGIN} --`,
     '- id: agent-loop',
     '  disabled: true',
     END_MARKER_LINE,
@@ -51,17 +52,6 @@ export function renderManagedBlock(engine: LoopEngineId): string {
 /** Whether a patch-file text contains the managed block span. */
 export function hasManagedBlock(text: string): boolean {
   return text.includes(MANAGED_BLOCK_BEGIN)
-}
-
-/** Begin-marker line pattern carrying the engine name (`<name>` is the engine id). */
-const BEGIN_MARKER_RE = /^# -- dsh-loop-engine managed block: (\S+) --$/m
-
-/** Derive the current engine from a patch-file text by the managed block's begin marker. */
-export function currentEngineOf(text: string): LoopEngineId {
-  const engine = BEGIN_MARKER_RE.exec(text)?.[1]
-  return (LOOP_ENGINE_IDS as readonly string[]).includes(engine ?? '')
-    ? engine as LoopEngineId
-    : 'in-process'
 }
 
 /** Split a patch-file text at the managed span; absent span means it appends. */
@@ -120,68 +110,44 @@ function isEmptyFlowSeqDocument(text: string): boolean {
  * `[]` is a complete flow-style document: appending block sequence items after
  * it is a YAML syntax error, so it has to go before a block can be written. An
  * empty list carries no information, so removing it loses nothing.
+ *
+ * Only ever called behind {@link isEmptyFlowSeqDocument}, which returns true
+ * exactly when such a line exists, so the search always hits.
  */
 function stripEmptyFlowSeq(text: string): string {
   const lines = text.split('\n')
   const at = lines.findIndex((line) => EMPTY_FLOW_SEQ_RE.test(line))
-  if (at === -1) return text
   lines.splice(at, 1)
   return lines.join('\n')
 }
 
 /**
- * Produce the next patch-file text for a target engine, preserving every byte
- * outside the managed span. Appends the span when absent; replaces or removes
- * it when present.
+ * Ensure the permanent managed block is present, preserving every byte outside
+ * the managed span. Appends the span when absent; rewrites it in place when
+ * present, which also upgrades a legacy engine-tagged marker from the era when
+ * the block encoded the selected engine.
  *
  * The file must always parse as a top-level YAML *array*: app-boot's
  * `parsePatchList` throws `must be a top-level YAML array of loader patch
  * entries` on anything else, which fails the whole plugin tree — including this
  * plugin's own `insert` row, so no agent factory registers at all.
  *
- * That constrains both directions:
- *   - A fresh profile's file is `[]`, a complete flow-style document. Block
- *     sequence items cannot follow it, so the `[]` is dropped when a block goes
- *     in.
- *   - Removing the last block must not leave a comments-only file: that parses
- *     as `null`, not `[]`. The `[]` is restored so the list stays a list.
+ * A fresh profile's file is `[]`, a complete flow-style document. Block
+ * sequence items cannot follow it, so the `[]` is dropped when the block goes
+ * in. The reverse direction no longer exists: the block is permanent, so it is
+ * never removed and can never leave a comments-only file behind.
  *
  * @param text - current patch-file text.
- * @param engine - target engine.
  * @returns the rewritten patch-file text.
  */
-export function applyManagedBlock(text: string, engine: LoopEngineId): string {
-  const block = renderManagedBlock(engine)
+export function applyManagedBlock(text: string): string {
+  const block = renderManagedBlock()
   const span = managedSpan(text)
   if (!span.present) {
-    if (block === '') return text
     const base = ensureTrailingNewline(
       isEmptyFlowSeqDocument(text) ? stripEmptyFlowSeq(text).trimEnd() : text,
     )
     return `${base}\n${block}`
   }
-  if (block === '') {
-    // Collapse the blank separator that preceded the removed span so repeated
-    // switches do not accumulate blank lines; the head already shed one blank
-    // in managedSpan, and the tail's leading blank is the span's own newline.
-    const removed = span.tail.startsWith('\n')
-      ? `${span.head}${span.tail.slice(1)}`
-      : `${span.head}${span.tail}`
-    return hasYamlContent(removed) ? removed : withEmptyFlowSeq(removed)
-  }
   return `${span.head}${span.blankBefore ? '\n' : ''}${block}${span.tail}`
-}
-
-/** Whether a patch-file text carries YAML content (not just comments and blanks). */
-function hasYamlContent(text: string): boolean {
-  return text.split('\n').some((line) => {
-    const trimmed = line.trim()
-    return trimmed !== '' && !trimmed.startsWith('#')
-  })
-}
-
-/** Re-add the `[]` body so a comments-only file still parses as a patch list. */
-function withEmptyFlowSeq(text: string): string {
-  if (text.trim() === '') return '[]\n'
-  return `${ensureTrailingNewline(text.trimEnd())}[]\n`
 }

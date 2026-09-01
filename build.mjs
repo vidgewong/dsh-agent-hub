@@ -39,6 +39,14 @@ const NODE_EXTERNALS = [
   '@deepseek-ai/dsh-settings',
   '@deepseek-ai/dsh-home-paths',
   '@deepseek-ai/dsh-invariants',
+  // The base in-process loop, hosted behind the router as the `in-process`
+  // engine. Externalizing it is mandatory, not just an optimization: it is
+  // dynamically imported at runtime and resolves against the profile's own
+  // harness line. Inlining it here bakes in this repo's dev copy (a junction
+  // to the monorepo source, a newer cordis line), which then fails to link at
+  // boot against the installed cordis — `does not provide an export named
+  // 'FiberState'`.
+  '@deepseek-ai/dsh-agent-loop',
   // Claude Code engine peers: each must stay a single shared runtime instance.
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-llm',

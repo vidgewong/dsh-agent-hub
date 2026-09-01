@@ -8,8 +8,7 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import { type LoopEngineKey } from './locales.ts';
 export type { LoopEngineSectionInjected, LoopEngineSectionProps } from './LoopEngineSection.tsx';
-export type { LoopEngineBadgeInjected, LoopEngineBadgeProps } from './LoopEngineBadge.tsx';
-export type { LoopEngineComposerSelectInjected, LoopEngineComposerSelectProps } from './LoopEngineComposerSelect.tsx';
+export type { LoopEngineComposerSelectInjected, LoopEngineComposerSelectProps, SessionSwitcher } from './LoopEngineComposerSelect.tsx';
 export type { LoopEngineState } from './store.ts';
 declare module '@deepseek-ai/dsh-client-ui-slots' {
     interface LocaleNamespaceMap {

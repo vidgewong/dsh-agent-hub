@@ -36,12 +36,14 @@ interface LlmBrandExports {
 const brand = llm as unknown as LlmBrandExports
 const callIdBrand = brand.ToolCallId ?? brand.CallId
 
+/* v8 ignore start -- neither published dsh-llm line omits both names, so this guard cannot fire under any installable dependency set; it turns a future third rename into a named error instead of `CallId is not a function` at the first tool result. */
 if (!callIdBrand) {
   throw new Error(
     '@deepseek-ai/dsh-llm exports neither ToolCallId nor CallId; ' +
       'this dsh-llm version is not supported by @vidge/dsh-loop-engine',
   )
 }
+/* v8 ignore stop */
 
 /**
  * Brand a raw string as a tool-call id, resolving to whichever name the

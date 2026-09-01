@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile, readdir } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,18 +16,23 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry, { type AgentFactory } from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+
 import {
   apply,
+  mountBaseLoop,
+  registerEngineSkills,
   resolvePatchPath,
   syncManagedBlock,
   writePatchFile,
 } from '../src/index.ts'
-import { applyManagedBlock, currentEngineOf } from '../src/patch-manager.ts'
+import { applyManagedBlock, hasManagedBlock } from '../src/patch-manager.ts'
 import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../src/namespace.ts'
 import { CLAUDE_CODE_COMMANDS, type CommandDefinition } from '../src/commands.ts'
 import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from '../src/skills.ts'
 import { CodexSkillProvider } from '../src/engine-codex/skills.ts'
 import { PiSkillProvider } from '../src/engine-pi/skills.ts'
+import { EngineRecordStore } from '../src/engine-record.ts'
 
 // Partial mocks so a non-ENOENT read failure is reproducible on every host.
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -52,8 +57,15 @@ vi.mock('node:os', async (importOriginal) => {
 
 // Each test gets a fresh empty home, so `discoverUserSlashCommands` in the
 // claude-code mount path is deterministic regardless of the host's dotfiles.
+// `DSH_HOME` is redirected too: the `node:os` mock below only reaches importers
+// inside this module graph, and dsh-home-paths resolves its own copy — without
+// the env override the engine records would land in the developer's live
+// `~/.dsh/loop-engine`.
+let previousDshHome: string | undefined
 beforeEach(async () => {
   mockHome.path = await tempDir()
+  previousDshHome = process.env.DSH_HOME
+  process.env.DSH_HOME = join(mockHome.path, '.dsh')
 })
 
 const NS = LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL
@@ -96,6 +108,8 @@ async function boot(doc?: Record<string, unknown>) {
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
+  if (previousDshHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = previousDshHome
   while (cleanups.length > 0) {
     const dispose = cleanups.pop()!
     await dispose()
@@ -158,80 +172,83 @@ describe('writePatchFile', () => {
 })
 
 describe('syncManagedBlock', () => {
-  it('creates a missing file with the claude-code block', async () => {
+  it('creates a missing file with the permanent block', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
-    const changed = await syncManagedBlock(path, 'claude-code')
+    const changed = await syncManagedBlock(path)
     expect(changed).toBe(true)
     const text = await readFile(path, 'utf8')
-    expect(currentEngineOf(text)).toBe('claude-code')
+    expect(hasManagedBlock(text)).toBe(true)
     expect(text).toContain('- id: agent-loop\n  disabled: true')
   })
 
   it('reports no change when the file already matches', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
-    await writeFile(path, applyManagedBlock('# seed\n', 'claude-code'))
-    const changed = await syncManagedBlock(path, 'claude-code')
+    await writeFile(path, applyManagedBlock('# seed\n'))
+    const changed = await syncManagedBlock(path)
     expect(changed).toBe(false)
   })
 
-  it('switches an existing block to in-process, preserving surrounding lines', async () => {
+  it('upgrades a legacy engine-tagged block in place, preserving surrounding lines', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
     const seed = '# my patches\n- id: tool-x\n'
-    await writeFile(path, applyManagedBlock(seed, 'claude-code'))
-    const changed = await syncManagedBlock(path, 'in-process')
+    const legacy = `${seed}\n# -- dsh-loop-engine managed block: codex --\n- id: agent-loop\n  disabled: true\n# -- /dsh-loop-engine managed block --\n`
+    await writeFile(path, legacy)
+    const changed = await syncManagedBlock(path)
     expect(changed).toBe(true)
     const text = await readFile(path, 'utf8')
-    expect(text).toBe(seed)
-    expect(currentEngineOf(text)).toBe('in-process')
+    // The user's own rows survive byte for byte, and the block is the
+    // engine-independent one — the selection is runtime state now.
+    expect(text.startsWith(seed)).toBe(true)
+    expect(text).toBe(applyManagedBlock(seed))
+    expect(text).not.toContain('codex')
   })
 
-  it('leaves a matching in-process file untouched', async () => {
+  it('adds the block to a file that predates the plugin', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
     await writeFile(path, '# seed\n')
-    const changed = await syncManagedBlock(path, 'in-process')
-    expect(changed).toBe(false)
+    // The plugin now owns the AgentFactory slot in every configuration, so a
+    // block-free file is no longer a valid resting state.
+    expect(await syncManagedBlock(path)).toBe(true)
+    expect(hasManagedBlock(await readFile(path, 'utf8'))).toBe(true)
+    expect(await syncManagedBlock(path)).toBe(false)
   })
 
   it('rejects a non-ENOENT read failure instead of swallowing it', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
     mockedReadFile.mockRejectedValueOnce(Object.assign(new Error('EACCES'), { code: 'EACCES' }))
-    await expect(syncManagedBlock(path, 'in-process')).rejects.toThrow('EACCES')
+    await expect(syncManagedBlock(path)).rejects.toThrow('EACCES')
   })
 })
 
 describe('apply', () => {
-  it('seeds the section from the file and rewrites the block on a settings commit', async () => {
+  it('writes the permanent block at startup and leaves it alone on a settings commit', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
     const { ctx, fiber } = await boot({ [NS]: { engine: 'in-process' } })
     apply(ctx, { patchPath: path })
 
-    // Attach: entry seeded from the absent file (in-process), no write.
-    await new Promise(resolve => setTimeout(resolve, 20))
-    expect(await safeRead(path)).toBeUndefined()
+    // The block goes in synchronously at attach: the plugin owns the slot in
+    // every configuration, so it cannot wait for a selection to be made.
+    const afterAttach = await readFile(path, 'utf8')
+    expect(hasManagedBlock(afterAttach)).toBe(true)
 
-    // Committed settings change drives the managed block into the file.
+    // A selection change is runtime state and must not reach boot state.
     await ctx.settings.update(NS, { engine: 'claude-code' })
-    await vi.waitFor(async () => {
-      const text = await safeRead(path)
-      expect(text).toBeDefined()
-      expect(currentEngineOf(text ?? '')).toBe('claude-code')
-    })
-    // Let the fire-and-forget rename settle before teardown touches the dir.
     await new Promise(resolve => setTimeout(resolve, 30))
+    expect(await readFile(path, 'utf8')).toBe(afterAttach)
 
     await fiber.dispose()
   })
 
-  it('is idempotent: attach does not write when the file already matches', async () => {
+  it('is idempotent: attach does not rewrite a file that already matches', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
-    const seed = applyManagedBlock('# seed\n', 'claude-code')
+    const seed = applyManagedBlock('# seed\n')
     await writeFile(path, seed)
     const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
     apply(ctx, { patchPath: path })
@@ -245,14 +262,14 @@ describe('apply', () => {
   it('forwards the engine-driver configuration to the hosted Claude Code factory', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
-    const seed = applyManagedBlock('# seed\n', 'claude-code')
-    await writeFile(path, seed)
+    await writeFile(path, applyManagedBlock('# seed\n'))
     const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
     apply(ctx, {
       patchPath: path,
       permissionMode: 'plan',
       env: { ANTHROPIC_AUTH_TOKEN: 'x' },
       model: 'claude-opus-4-6',
+      backend: 'anthropic',
       disposeGraceMs: 1000,
       maxTurns: 4,
     })
@@ -266,6 +283,7 @@ describe('apply', () => {
       permissionMode: 'plan',
       env: { ANTHROPIC_AUTH_TOKEN: 'x' },
       model: 'claude-opus-4-6',
+      backend: 'anthropic',
       disposeGraceMs: 1000,
       maxTurns: 4,
     })
@@ -273,33 +291,37 @@ describe('apply', () => {
     await fiber.dispose()
   })
 
-  it('logs and keeps the old engine when the write fails', async () => {
+  it('logs and keeps running when the block write fails', async () => {
     const dir = await tempDir()
     // Point the file write at a path whose parent is a file: mkdir and rename
-    // both fail, so the block write rejects and the plugin reports it.
+    // both fail, so the block write throws and the plugin reports it.
     const blocker = join(dir, 'blocker')
     await writeFile(blocker, 'x')
     const badPath = join(blocker, 'cordis.patch.yml')
     const { ctx, fiber } = await boot({ [NS]: { engine: 'in-process' } })
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
     apply(ctx, { patchPath: badPath })
-    await new Promise(resolve => setTimeout(resolve, 20))
-    await ctx.settings.update(NS, { engine: 'claude-code' })
+
+    expect(errorSpy.mock.calls.some(call => String(call[0]).includes('managed block write failed'))).toBe(true)
+    // A profile the plugin cannot patch still routes in-process sessions, so
+    // the engines mount regardless.
     await vi.waitFor(() => {
-      expect(errorSpy).toHaveBeenCalled()
+      expect(ctx.get('agentLoopClaudeCode')).toBeDefined()
     })
 
     await fiber.dispose()
   })
 
-  it('propagates a non-ENOENT failure from the startup read', async () => {
+  it('reports a non-ENOENT failure from the startup read without failing the plugin', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
     mockedReadFileSync.mockImplementationOnce(() => {
       throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
     })
     const { ctx, fiber } = await boot()
-    expect(() => apply(ctx, { patchPath: path })).toThrow('EACCES')
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    apply(ctx, { patchPath: path })
+    expect(errorSpy.mock.calls.some(call => String(call[0]).includes('EACCES'))).toBe(true)
     await fiber.dispose()
   })
 })
@@ -347,31 +369,38 @@ function fakeSkillsService() {
   return { creates, disposer, registerProvider }
 }
 
-describe('apply mount registrations', () => {
-  it('registers commands and the skill provider while claude-code is mounted, and disposes them on unmount', async () => {
+
+describe('apply command registrations', () => {
+  it('registers the claude-code commands globally', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
-    await writeFile(path, applyManagedBlock('# seed\n', 'claude-code'))
+    await writeFile(path, applyManagedBlock('# seed\n'))
     const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
     const commands = fakeCommandsService()
-    const skills = fakeSkillsService()
     ctx.provide('commands', commands)
-    ctx.provide('skills', skills)
     apply(ctx, { patchPath: path })
     await new Promise(resolve => setTimeout(resolve, 20))
 
+    // Slash commands are a client-side namespace, not a scoped registry, so
+    // they cannot ride the per-agent seam and stay globally registered.
     expect(commands.registered.map(def => def.name)).toEqual(CLAUDE_CODE_COMMANDS.map(def => def.name))
-    expect(skills.creates).toHaveLength(1)
-    const control: SkillProviderControl = { signal: new AbortController().signal, invalidate: () => {} }
-    expect(skills.creates[0]!(control)).toBeInstanceOf(ClaudeCodeSkillProvider)
 
-    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
-    await vi.waitFor(() => {
-      expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
-    })
-    expect(commands.disposers).toHaveLength(CLAUDE_CODE_COMMANDS.length)
-    for (const dispose of commands.disposers) expect(dispose).toHaveBeenCalledTimes(1)
-    expect(skills.disposer).toHaveBeenCalledTimes(1)
+    await fiber.dispose()
+  })
+
+  it('registers the commands regardless of the selected engine', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
+    const commands = fakeCommandsService()
+    ctx.provide('commands', commands)
+    apply(ctx, { patchPath: path })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    // The selection is per-session now, so a claude session can be created at
+    // any time and its commands must already be there.
+    expect(commands.registered).toHaveLength(CLAUDE_CODE_COMMANDS.length)
 
     await fiber.dispose()
   })
@@ -379,197 +408,214 @@ describe('apply mount registrations', () => {
   it('skips a command registration that collides with a dsh-native command', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
-    await writeFile(path, applyManagedBlock('# seed\n', 'claude-code'))
+    await writeFile(path, applyManagedBlock('# seed\n'))
     const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
     const commands = fakeCommandsService()
-    const skills = fakeSkillsService()
-    // The first registration (help) collides with an existing dsh-native
-    // command; the mount must skip it with a warning, not fail the engine.
     const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
     commands.register.mockImplementationOnce(() => {
       throw new Error('command "help" is already registered')
     })
     ctx.provide('commands', commands)
-    ctx.provide('skills', skills)
     apply(ctx, { patchPath: path })
     await new Promise(resolve => setTimeout(resolve, 20))
 
     expect(commands.registered).toHaveLength(CLAUDE_CODE_COMMANDS.length - 1)
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skip claude-code command /help'))
-    expect(skills.creates).toHaveLength(1)
 
     await fiber.dispose()
   })
 
-  it('cleans up registrations when the factory fails to start, and tolerates a later unmount', async () => {
+  it('runs without a host commands service at all', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
-    await writeFile(path, applyManagedBlock('# seed\n', 'claude-code'))
+    await writeFile(path, applyManagedBlock('# seed\n'))
     const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
-    const commands = fakeCommandsService()
-    const skills = fakeSkillsService()
-    ctx.provide('commands', commands)
-    ctx.provide('skills', skills)
-    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
-    // A non-finite grace makes the loop's config boundary throw, so the
-    // plugin fiber rejects and mountClaude rolls its registrations back.
-    apply(ctx, { patchPath: path, disposeGraceMs: Number.NaN })
-
-    await vi.waitFor(() => {
-      expect(errorSpy.mock.calls.some(call => String(call[0]).includes('claude-code factory failed to start'))).toBe(true)
-    })
-    for (const dispose of commands.disposers) expect(dispose).toHaveBeenCalledTimes(1)
-    expect(skills.disposer).toHaveBeenCalledTimes(1)
-
-    // The failed mount cleared its slot: a later switch back to in-process
-    // runs the unmount path with nothing left to tear down.
-    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
-    await vi.waitFor(async () => {
-      expect(currentEngineOf((await safeRead(path)) ?? '')).toBe('in-process')
-    })
-
-    await fiber.dispose()
-  })
-
-  it('reports the failure when the factory fails to start without host services', async () => {
-    const dir = await tempDir()
-    const path = join(dir, 'cordis.patch.yml')
-    await writeFile(path, applyManagedBlock('# seed\n', 'claude-code'))
-    const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
-    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
-    apply(ctx, { patchPath: path, disposeGraceMs: Number.NaN })
-
-    await vi.waitFor(() => {
-      expect(errorSpy.mock.calls.some(call => String(call[0]).includes('claude-code factory failed to start'))).toBe(true)
-    })
-    expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
-
-    await fiber.dispose()
-  })
-
-  it('keeps the mounted factory when a failed block write re-enters the mount path', async () => {
-    const dir = await tempDir()
-    // Point the file write at a path whose parent is a file: the managed
-    // block write keeps failing, so fileEngine stays pinned to in-process.
-    const blocker = join(dir, 'blocker')
-    await writeFile(blocker, 'x')
-    const badPath = join(blocker, 'cordis.patch.yml')
-    const { ctx, fiber } = await boot({ [NS]: { engine: 'in-process' } })
-    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
-    apply(ctx, { patchPath: badPath })
-    await new Promise(resolve => setTimeout(resolve, 20))
-
-    // First switch mounts the factory but cannot persist the selection.
-    await ctx.settings.update(NS_BRANDED, { engine: 'claude-code' })
+    apply(ctx, { patchPath: path })
     await vi.waitFor(() => {
       expect(ctx.get('agentLoopClaudeCode')).toBeDefined()
     })
-    // Bouncing the settings value re-enters the mount path while the fiber
-    // is already mounted: the second mount must be a no-op, not a duplicate.
-    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
-    await ctx.settings.update(NS_BRANDED, { engine: 'claude-code' })
-    await vi.waitFor(() => {
-      expect(errorSpy.mock.calls.filter(call => String(call[0]).includes('managed block write failed'))).toHaveLength(2)
-    })
-    expect(ctx.get('agentLoopClaudeCode')).toBeDefined()
-
-    await fiber.dispose()
-  })
-
-  it('recovers the factory slot when a runtime switch races the base loop disposal', async () => {
-    const dir = await tempDir()
-    const path = join(dir, 'cordis.patch.yml')
-    // Boot with the base row active (in-process): the plugin mounts nothing.
-    await writeFile(path, '# seed\n')
-    const { ctx, fiber } = await boot({ [NS]: { engine: 'in-process' } })
-    // The base agent-loop owns the single AgentFactory slot, like a real boot.
-    const releaseBase = ctx.agents.setFactory(fakeAgentFactory())
-    apply(ctx, { patchPath: path })
-    // installSettingsSection registers the namespace inside a dependency
-    // inject callback; settle it before driving the settings scope.
-    await new Promise(resolve => setTimeout(resolve, 20))
-
-    // Switching to claude-code mounts the factory while the base still owns
-    // the slot: setFactory rejects, so the hosted factory stays unmounted
-    // until the patch-layer reload (which disables the base row) releases it.
-    await ctx.settings.update(NS_BRANDED, { engine: 'claude-code' })
-    await new Promise(resolve => setTimeout(resolve, 20))
-    expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
-
-    // The reload lands: the base loop's factory is released, and the bounded
-    // retry registers the Claude Code factory in its place.
-    releaseBase()
-    await vi.waitFor(() => {
-      expect(ctx.get('agentLoopClaudeCode')).toBeDefined()
-    })
-
-    // The slot is served again: a create reaches the Claude Code factory
-    // instead of failing with "no agent factory registered".
-    const handle = await ctx.agents.create({
-      sessionId: SessionId('runtime-switch-s'),
-      meta: { cwd: process.cwd() },
-    })
-    expect(handle.agent).toBeDefined()
-    await handle.dispose()
-
-    await fiber.dispose()
-  })
-
-  it('clears a pending slot retry when the plugin is disposed', async () => {
-    const dir = await tempDir()
-    const path = join(dir, 'cordis.patch.yml')
-    await writeFile(path, '# seed\n')
-    const { ctx } = await boot({ [NS]: { engine: 'in-process' } })
-    ctx.agents.setFactory(fakeAgentFactory()) // never released
-    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
-    apply(ctx, { patchPath: path })
-    await new Promise(resolve => setTimeout(resolve, 20))
-
-    await ctx.settings.update(NS_BRANDED, { engine: 'claude-code' })
-    // Let the first collision land and the retry be scheduled, then tear the
-    // plugin down while the retry is still pending.
-    await new Promise(resolve => setTimeout(resolve, 30))
-    await ctx.fiber.dispose()
-
-    // The pending retry was cleared: no late failure log after disposal.
-    await new Promise(resolve => setTimeout(resolve, 80))
-    expect(errorSpy.mock.calls.some(call => String(call[0]).includes('claude-code factory failed to start'))).toBe(false)
-  })
-
-  it('fails loud when the base loop never releases the factory slot', async () => {
-    const dir = await tempDir()
-    const path = join(dir, 'cordis.patch.yml')
-    await writeFile(path, '# seed\n')
-    const { ctx, fiber } = await boot({ [NS]: { engine: 'in-process' } })
-    const releaseBase = ctx.agents.setFactory(fakeAgentFactory())
-    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
-    apply(ctx, { patchPath: path })
-    // Settle the settings-section registration before driving the switch.
-    await new Promise(resolve => setTimeout(resolve, 20))
-
-    await ctx.settings.update(NS_BRANDED, { engine: 'claude-code' })
-    // The retry window exhausts without the slot ever freeing: one loud
-    // failure instead of an endless mount loop.
-    await vi.waitFor(() => {
-      expect(errorSpy.mock.calls.some(call => String(call[0]).includes('claude-code factory failed to start'))).toBe(true)
-    }, { timeout: 5000 })
-    expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
-    releaseBase()
 
     await fiber.dispose()
   })
 })
 
-describe('apply codex engine', () => {
-  it('mounts the codex factory and forwards the codex driver configuration', async () => {
+describe('apply per-session skill registration', () => {
+  /**
+   * Skill providers are no longer registered globally: the router wraps each
+   * session's `setup` and registers the engine's provider through the agent's
+   * OWN scope-tagged context, so the harness's layered registry shows it to
+   * exactly that session. These tests drive that seam through `ctx.agents`.
+   */
+  async function bootRouted(engine: string) {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
-    await writeFile(path, applyManagedBlock('# seed\n', 'codex'))
-    const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
-    const commands = fakeCommandsService()
+    await writeFile(path, applyManagedBlock('# seed\n'))
+    const { ctx, fiber } = await boot({ [NS]: { engine } })
     const skills = fakeSkillsService()
-    ctx.provide('commands', commands)
+    // The agent context inherits `skills` from the plugin context, which is
+    // what the router's setup wrapper reads.
     ctx.provide('skills', skills)
+    apply(ctx, { patchPath: path })
+    return { ctx, fiber, skills }
+  }
+
+  it('registers no skill provider before any session exists', async () => {
+    const { ctx, fiber, skills } = await bootRouted('claude-code')
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopClaudeCode')).toBeDefined()
+    })
+    // The old design registered one provider globally at mount; that is what
+    // leaked `~/.claude/skills` into a codex session.
+    expect(skills.creates).toHaveLength(0)
+
+    await fiber.dispose()
+  })
+
+  it('registers the claude provider for a session created on claude-code', async () => {
+    const { ctx, fiber, skills } = await bootRouted('claude-code')
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopClaudeCode')).toBeDefined()
+    })
+
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('skills-claude'),
+      meta: { cwd: process.cwd() },
+    })
+    expect(skills.creates).toHaveLength(1)
+    const control: SkillProviderControl = { signal: new AbortController().signal, invalidate: () => {} }
+    expect(skills.creates[0]!(control)).toBeInstanceOf(ClaudeCodeSkillProvider)
+    await handle.dispose()
+
+    await fiber.dispose()
+  })
+
+  it('registers the codex provider for a session created on codex', async () => {
+    const { ctx, fiber, skills } = await bootRouted('codex')
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopCodex')).toBeDefined()
+    })
+
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('skills-codex'),
+      meta: { cwd: process.cwd() },
+    })
+    const control: SkillProviderControl = { signal: new AbortController().signal, invalidate: () => {} }
+    expect(skills.creates[0]!(control)).toBeInstanceOf(CodexSkillProvider)
+    await handle.dispose()
+
+    await fiber.dispose()
+  })
+
+  it('registers the pi provider for a session created on pi', async () => {
+    const { ctx, fiber, skills } = await bootRouted('pi')
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopPi')).toBeDefined()
+    })
+
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('skills-pi'),
+      meta: { cwd: process.cwd() },
+    })
+    const control: SkillProviderControl = { signal: new AbortController().signal, invalidate: () => {} }
+    expect(skills.creates[0]!(control)).toBeInstanceOf(PiSkillProvider)
+    await handle.dispose()
+
+    await fiber.dispose()
+  })
+
+  it('registers no engine provider for an in-process session', () => {
+    // The base loop injects `llm` and `tools`, which this suite does not boot,
+    // so it cannot be mounted here; `mountBaseLoop` is covered directly below.
+    // What matters at this seam is the decorator's engine mapping: the three
+    // driver engines contribute a provider and `in-process` contributes none,
+    // because the base loop brings the harness's own skills.
+    const creates: Array<(control: SkillProviderControl) => SkillProvider> = []
+    const agentCtx = {
+      get: () => ({ registerProvider: (create: (control: SkillProviderControl) => SkillProvider) => {
+        creates.push(create)
+        return () => {}
+      } }),
+    } as unknown as Context
+
+    registerEngineSkills('in-process', agentCtx)
+    expect(creates).toHaveLength(0)
+
+    registerEngineSkills('claude-code', agentCtx)
+    expect(creates).toHaveLength(1)
+  })
+})
+
+describe('per-session routing', () => {
+  it('creates each session on the engine selected at that moment', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
+    apply(ctx, { patchPath: path })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopCodex')).toBeDefined()
+    })
+
+    const first = await ctx.agents.create({
+      sessionId: SessionId('routing-codex'),
+      meta: { cwd: process.cwd() },
+    })
+
+    // Switching mid-flight must not disturb the session already running.
+    await ctx.settings.update(NS_BRANDED, { engine: 'claude-code' })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(first.agent).toBeDefined()
+
+    const second = await ctx.agents.create({
+      sessionId: SessionId('routing-claude'),
+      meta: { cwd: process.cwd() },
+    })
+    expect(second.agent).toBeDefined()
+    // Distinct engines serve them: the agents are different classes.
+    expect(second.agent.constructor).not.toBe(first.agent.constructor)
+
+    await second.dispose()
+    await first.dispose()
+    await fiber.dispose()
+  })
+
+  it('records the creating engine durably so a later resume can recover it', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
+    apply(ctx, { patchPath: path })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopCodex')).toBeDefined()
+    })
+
+    const created = await ctx.agents.create({
+      sessionId: SessionId('resume-codex'),
+      meta: { cwd: process.cwd() },
+    })
+    await created.dispose()
+
+    // The selection moves on, but the record pins the session to the engine
+    // that wrote its history — this is what makes resume correct. The full
+    // dispatch is asserted against the router directly in tests/router.spec.ts.
+    await ctx.settings.update(NS_BRANDED, { engine: 'claude-code' })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const store = new EngineRecordStore(
+      () => ctx.get('sessionPersistence') as never,
+    )
+    expect(await store.recall('resume-codex')).toBe('codex')
+
+    await fiber.dispose()
+  })
+})
+
+describe('engine driver configuration', () => {
+  it('forwards the codex driver configuration', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
     apply(ctx, {
       patchPath: path,
       sandboxMode: 'workspace-write',
@@ -580,82 +626,21 @@ describe('apply codex engine', () => {
     await vi.waitFor(() => {
       expect(ctx.get('agentLoopCodex')).toBeDefined()
     })
-    const loop = ctx.get('agentLoopCodex')!
-    expect(loop.config).toMatchObject({
+    expect(ctx.get('agentLoopCodex')!.config).toMatchObject({
       sandboxMode: 'workspace-write',
       approvalPolicy: 'on-failure',
       env: { CX_ENV: '1' },
       model: 'gpt-5.2-codex',
     })
-    // The codex engine registers no commands but does mount its AGENTS.md skill provider.
-    expect(commands.registered).toHaveLength(0)
-    expect(skills.creates).toHaveLength(1)
-    const control: SkillProviderControl = { signal: new AbortController().signal, invalidate: () => {} }
-    expect(skills.creates[0]!(control)).toBeInstanceOf(CodexSkillProvider)
-    expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
 
     await fiber.dispose()
   })
 
-  it('switches between hosted engines in the same process', async () => {
+  it('forwards the pi driver configuration', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
-    await writeFile(path, applyManagedBlock('# seed\n', 'claude-code'))
-    const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
-    apply(ctx, { patchPath: path })
-    await vi.waitFor(() => {
-      expect(ctx.get('agentLoopClaudeCode')).toBeDefined()
-    })
-
-    // claude-code -> codex: the claude fiber unmounts and the codex fiber mounts.
-    await ctx.settings.update(NS_BRANDED, { engine: 'codex' })
-    await vi.waitFor(() => {
-      expect(ctx.get('agentLoopCodex')).toBeDefined()
-    })
-    await vi.waitFor(() => {
-      expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
-    })
-    expect(currentEngineOf(await readFile(path, 'utf8'))).toBe('codex')
-
-    // codex -> in-process: the codex fiber unmounts and the block leaves the file.
-    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
-    await vi.waitFor(() => {
-      expect(ctx.get('agentLoopCodex')).toBeUndefined()
-    })
-    expect(currentEngineOf(await readFile(path, 'utf8'))).toBe('in-process')
-
-    await fiber.dispose()
-  })
-
-  it('mounts the codex factory without a config-boundary disposeGraceMs check', async () => {
-    const dir = await tempDir()
-    const path = join(dir, 'cordis.patch.yml')
-    await writeFile(path, applyManagedBlock('# seed\n', 'codex'))
-    const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
-    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
-    // The codex config boundary no longer validates disposeGraceMs (it was a
-    // dead knob), so a non-finite value is accepted and the factory mounts.
-    apply(ctx, { patchPath: path, disposeGraceMs: Number.NaN })
-
-    await vi.waitFor(() => {
-      expect(ctx.get('agentLoopCodex')).toBeDefined()
-    })
-    expect(errorSpy).not.toHaveBeenCalled()
-
-    await fiber.dispose()
-  })
-})
-
-describe('apply pi engine', () => {
-  it('mounts the pi factory and forwards the pi driver configuration', async () => {
-    const dir = await tempDir()
-    const path = join(dir, 'cordis.patch.yml')
-    await writeFile(path, applyManagedBlock('# seed\n', 'pi'))
+    await writeFile(path, applyManagedBlock('# seed\n'))
     const { ctx, fiber } = await boot({ [NS]: { engine: 'pi' } })
-    const commands = fakeCommandsService()
-    const skills = fakeSkillsService()
-    ctx.provide('commands', commands)
-    ctx.provide('skills', skills)
     apply(ctx, {
       patchPath: path,
       sandboxMode: 'workspace-write',
@@ -667,67 +652,363 @@ describe('apply pi engine', () => {
     await vi.waitFor(() => {
       expect(ctx.get('agentLoopPi')).toBeDefined()
     })
-    const loop = ctx.get('agentLoopPi')!
-    expect(loop.config).toMatchObject({
+    expect(ctx.get('agentLoopPi')!.config).toMatchObject({
       sandboxMode: 'workspace-write',
       env: { PI_ENV: '1' },
       model: 'pi-deployment-model',
       provider: 'anthropic',
       thinkingLevel: 'high',
     })
-    // The pi engine registers no commands but does mount its AGENTS.md skill provider.
-    expect(commands.registered).toHaveLength(0)
-    expect(skills.creates).toHaveLength(1)
-    const control: SkillProviderControl = { signal: new AbortController().signal, invalidate: () => {} }
-    expect(skills.creates[0]!(control)).toBeInstanceOf(PiSkillProvider)
-    expect(ctx.get('agentLoopCodex')).toBeUndefined()
 
     await fiber.dispose()
   })
 
-  it('switches between hosted engines including pi in the same process', async () => {
+  it('reports an engine whose fiber fails to start and leaves the rest mounted', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
-    await writeFile(path, applyManagedBlock('# seed\n', 'codex'))
-    const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
+    await writeFile(path, applyManagedBlock('# seed\n'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    // A non-finite grace makes the claude loop's config boundary throw. Codex
+    // and pi do not validate it, so they must still come up.
+    apply(ctx, { patchPath: path, disposeGraceMs: Number.NaN })
+
+    await vi.waitFor(() => {
+      expect(errorSpy.mock.calls.some(call => String(call[0]).includes('claude-code factory failed to start'))).toBe(true)
+    })
+    expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopCodex')).toBeDefined()
+    })
+
+    await fiber.dispose()
+  })
+
+  it('fails a session loudly when its engine is not mounted', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
+    vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    apply(ctx, { patchPath: path, disposeGraceMs: Number.NaN })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopCodex')).toBeDefined()
+    })
+
+    // Silently falling back would run the session on an engine that cannot
+    // read its history — the exact defect per-session routing removes.
+    await expect(ctx.agents.create({
+      sessionId: SessionId('unmounted-engine'),
+      meta: { cwd: process.cwd() },
+    })).rejects.toThrow(/engine "claude-code" is not mounted/)
+
+    await fiber.dispose()
+  })
+})
+
+describe('mountBaseLoop', () => {
+  it('mounts the base loop with an empty declarative agent list', async () => {
+    const ctx = new Context()
+    const mounted: string[] = []
+    const loopCtx = {
+      plugin: vi.fn((_plugin: unknown, config: unknown) => {
+        mounted.push(JSON.stringify(config))
+        return Promise.resolve({}) as never
+      }),
+    } as unknown as Context
+
+    mountBaseLoop(ctx, loopCtx, (engine, plugin) => {
+      mounted.push(engine)
+      void plugin()
+    })
+    await vi.waitFor(() => {
+      expect(mounted).toContain('in-process')
+    })
+
+    // Sessions are always created on demand through the router, so the base
+    // loop's boot-time composition list must be empty.
+    expect(mounted).toContain(JSON.stringify({ agents: [] }))
+  })
+
+  it('loses only the in-process engine when the peer package is absent', async () => {
+    const ctx = new Context()
+    const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    // The base loop is a peer dependency: a deployment that omits it must not
+    // fail the whole plugin tree.
+    vi.doMock('@deepseek-ai/dsh-agent-loop', () => {
+      throw new Error('Cannot find package')
+    })
+    vi.resetModules()
+    const { mountBaseLoop: fresh } = await import('../src/index.ts')
+
+    const mount = vi.fn()
+    fresh(ctx, {} as Context, mount)
+    await vi.waitFor(() => {
+      expect(warnSpy.mock.calls.some(call =>
+        String(call[0]).includes('in-process engine unavailable'))).toBe(true)
+    })
+    expect(mount).not.toHaveBeenCalled()
+
+    vi.doUnmock('@deepseek-ai/dsh-agent-loop')
+    vi.resetModules()
+  })
+})
+
+describe('apply durable-record wiring', () => {
+  it('resumes a session on the engine its record names', async () => {
+    const root = await tempDir()
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n'))
+
+    // Seed a durable session the way a previous process would have left one.
+    const seedCtx = new Context()
+    await seedCtx.plugin(SessionStore)
+    await seedCtx.plugin(JsonlSessionPersistence, { root })
+    const seeded = seedCtx.sessions.create(SessionId('recorded-codex'), {
+      meta: { cwd: process.cwd() },
+      seed: [
+        { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+        { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
+      ],
+    })
+    await seedCtx.sessions.flush(seeded)
+    await seedCtx.fiber.dispose()
+
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
+    await ctx.plugin(JsonlSessionPersistence, { root })
     apply(ctx, { patchPath: path })
     await vi.waitFor(() => {
       expect(ctx.get('agentLoopCodex')).toBeDefined()
     })
 
-    // codex -> pi: the codex fiber unmounts and the pi fiber mounts.
-    await ctx.settings.update(NS_BRANDED, { engine: 'pi' })
+    // Pre-seed the record the way createAgent would, then resume while the
+    // selection points at a different engine: the record must win, because
+    // codex is the only engine that can read this session's provenance.
+    // The cwd is part of the key: the JSONL backend files a session under its
+    // project directory, so a record written without it is unreadable here.
+    const store = new EngineRecordStore(() => ctx.get('sessionPersistence') as never)
+    await store.remember({ id: 'recorded-codex', cwd: process.cwd() }, 'codex')
+
+    const resumed = await ctx.agents.resume({
+      resumeSessionId: SessionId('recorded-codex'),
+      meta: { cwd: process.cwd() },
+    })
+    expect(resumed.agent.constructor.name).toMatch(/Codex/)
+
+    await resumed.dispose()
+    await fiber.dispose()
+  })
+
+  it('warns instead of failing when the orphan sweep cannot run', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'in-process' } })
+    const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    // A regular file where the record directory belongs makes readdir throw
+    // ENOTDIR. Startup must survive it: the sweep is housekeeping, not wiring.
+    await mkdir(resolveDshHome(), { recursive: true })
+    await writeFile(join(resolveDshHome(), 'loop-engine'), 'not a directory', 'utf8')
+
+    apply(ctx, { patchPath: path })
+    await vi.waitFor(() => {
+      expect(warnSpy.mock.calls.some(call =>
+        String(call[0]).includes('orphan record sweep failed'))).toBe(true)
+    })
+
+    await fiber.dispose()
+  })
+})
+
+describe('apply engine RPC wiring', () => {
+  /**
+   * A fake host Connection that records the channels registered on it.
+   *
+   * `rpc.handle` is the only member the plugin touches. It mirrors one detail of
+   * the real `HostConnectionService` that a looser fake hid for a whole release:
+   * registering a channel registers a *route*, via `owner.webServer.register(...)`
+   * on the fiber that read the service (`client/connection/src/rpc-host.ts:172-175`).
+   * When that fiber has no `webServer`, the real implementation throws on the
+   * undefined read — so this fake throws too. Without that, a plugin injecting
+   * only `connection` looked perfectly healthy in tests while every request to
+   * the channel 405'd in the browser.
+   *
+   * The disposer is async because the real one awaits route removal.
+   */
+  function fakeConnection(webServerOf: () => unknown) {
+    const channels = new Map<string, (endpoint: string, payload: unknown, signal: AbortSignal) => unknown>()
+    return {
+      channels,
+      rpc: {
+        handle(channel: string, handler: (endpoint: string, payload: unknown, signal: AbortSignal) => unknown, options: { authority: string }) {
+          if (webServerOf() === undefined) {
+            throw new TypeError(`fake connection: ${channel} registered on a fiber with no webServer`)
+          }
+          // The host reads `options.authority` immediately; omitting the
+          // argument throws inside the effect, which cordis swallows into the
+          // fiber, leaving the route silently unregistered and every request
+          // 405ing. Reproduced here so the arity cannot regress unnoticed.
+          if (options?.authority === undefined) {
+            throw new TypeError("Cannot read properties of undefined (reading 'authority')")
+          }
+          channels.set(channel, handler)
+          return async () => { channels.delete(channel) }
+        },
+      },
+    }
+  }
+
+  /** Boot the plugin with a Connection provided, and wait for the channel. */
+  async function bootConnected(provideBefore: boolean) {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
+    const connection = fakeConnection(() => ctx.get('webServer'))
+    if (provideBefore) {
+      ctx.provide('webServer', { register: () => () => {} })
+      ctx.provide('connection', connection)
+    }
+    apply(ctx, { patchPath: path })
+    // The services arriving *after* apply is the case that broke in production
+    // twice over: a bare `ctx.get('connection')` missed the connection
+    // permanently, and injecting `connection` without `webServer` ran this
+    // callback before the server existed, so the channel never mounted.
+    // Deliberately provided in the order that leaves `webServer` last.
+    if (!provideBefore) {
+      ctx.provide('connection', connection)
+      ctx.provide('webServer', { register: () => () => {} })
+    }
+    await vi.waitFor(() => {
+      expect(connection.channels.has('/loop-engine')).toBe(true)
+    })
+    return { ctx, fiber, connection }
+  }
+
+  it('registers the channel when the Connection is already provided', async () => {
+    const { fiber, connection } = await bootConnected(true)
+    expect([...connection.channels.keys()]).toEqual(['/loop-engine'])
+    await fiber.dispose()
+  })
+
+  it('registers the channel when the Connection arrives after apply', async () => {
+    // The regression this guards: `connection` is provided by a sibling plugin
+    // that may still be loading, and reading it eagerly left the composer with
+    // no channel and therefore no visible engine control.
+    const { fiber, connection } = await bootConnected(false)
+    expect(connection.channels.has('/loop-engine')).toBe(true)
+    await fiber.dispose()
+  })
+
+  it('waits for the web server before registering the channel', async () => {
+    // Registering a channel registers a route, so the callback must not run
+    // until `webServer` exists. With `inject(['connection'])` alone it ran as
+    // soon as the connection arrived, threw on the undefined `webServer`, and
+    // left the channel unregistered for the life of the process — which is
+    // exactly what "switching does nothing" looked like from the browser.
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
+    const connection = fakeConnection(() => ctx.get('webServer'))
+    ctx.provide('connection', connection)
+    apply(ctx, { patchPath: path })
+
+    // Connection alone must not be enough to attempt registration.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(connection.channels.has('/loop-engine')).toBe(false)
+
+    ctx.provide('webServer', { register: () => () => {} })
+    await vi.waitFor(() => {
+      expect(connection.channels.has('/loop-engine')).toBe(true)
+    })
+    await fiber.dispose()
+  })
+
+  it('reserves an engine through bind and creates that session on it', async () => {
+    const { ctx, fiber, connection } = await bootConnected(true)
     await vi.waitFor(() => {
       expect(ctx.get('agentLoopPi')).toBeDefined()
     })
-    await vi.waitFor(() => {
-      expect(ctx.get('agentLoopCodex')).toBeUndefined()
-    })
-    expect(currentEngineOf(await readFile(path, 'utf8'))).toBe('pi')
+    const handler = connection.channels.get('/loop-engine')!
+    const signal = new AbortController().signal
 
-    // pi -> in-process: the pi fiber unmounts and the block leaves the file.
-    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
-    await vi.waitFor(() => {
-      expect(ctx.get('agentLoopPi')).toBeUndefined()
+    // The profile default is codex; the reservation must beat it.
+    expect(await handler('bind', { sessionId: 'rpc-reserved', engine: 'pi' }, signal))
+      .toEqual({ ok: true, value: { engine: 'pi' } })
+
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('rpc-reserved'),
+      meta: { cwd: process.cwd() },
     })
-    expect(currentEngineOf(await readFile(path, 'utf8'))).toBe('in-process')
+    expect(handle.agent.constructor.name).toMatch(/Pi/)
+    await handle.dispose()
 
     await fiber.dispose()
   })
 
-  it('mounts the pi factory without a config-boundary disposeGraceMs check', async () => {
+  it('resolves a session with no record to the profile default', async () => {
+    const { fiber, connection } = await bootConnected(true)
+    const handler = connection.channels.get('/loop-engine')!
+    const signal = new AbortController().signal
+
+    // No persistence is mounted here, so `recall` finds nothing and falls
+    // through to `in-process` — the safe default an unpatched profile boots on.
+    expect(await handler('resolve', { sessionId: 'rpc-unknown' }, signal))
+      .toEqual({ ok: true, value: { engine: 'in-process' } })
+
+    await fiber.dispose()
+  })
+
+  it('resolves to the profile default when the record store throws', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
-    await writeFile(path, applyManagedBlock('# seed\n', 'pi'))
-    const { ctx, fiber } = await boot({ [NS]: { engine: 'pi' } })
-    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
-    apply(ctx, { patchPath: path, disposeGraceMs: Number.NaN })
-
+    await writeFile(path, applyManagedBlock('# seed\n'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
+    const connection = fakeConnection(() => ctx.get('webServer'))
+    ctx.provide('webServer', { register: () => () => {} })
+    ctx.provide('connection', connection)
+    apply(ctx, { patchPath: path })
     await vi.waitFor(() => {
-      expect(ctx.get('agentLoopPi')).toBeDefined()
+      expect(connection.channels.has('/loop-engine')).toBe(true)
     })
-    expect(errorSpy).not.toHaveBeenCalled()
+    const handler = connection.channels.get('/loop-engine')!
 
+    // A record file that exists but cannot be read is not a miss: `recall`
+    // rethrows anything that is not ENOENT, which is the only path to the
+    // channel's `fallback`.
+    mockedReadFile.mockRejectedValueOnce(Object.assign(new Error('EACCES'), { code: 'EACCES' }))
+
+    // The profile default — not `in-process` — because the store failed rather
+    // than reported no record.
+    expect(await handler('resolve', { sessionId: 'rpc-broken' }, new AbortController().signal))
+      .toEqual({ ok: true, value: { engine: 'codex' } })
+
+    await fiber.dispose()
+  })
+
+  it('withdraws the channel when the plugin unwinds', async () => {
+    const { ctx, connection } = await bootConnected(true)
+    // `apply` runs directly on the root context here (not as a child plugin),
+    // so its effects — the inject fiber included — unwind with that context.
+    await ctx.fiber.dispose()
+    await vi.waitFor(() => {
+      expect(connection.channels.has('/loop-engine')).toBe(false)
+    })
+  })
+
+  it('mounts without a Connection at all', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'in-process' } })
+    apply(ctx, { patchPath: path })
+    // Per-session routing is node-side, so a headless profile still routes;
+    // only the browser controls degrade.
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopCodex')).toBeDefined()
+    })
     await fiber.dispose()
   })
 })

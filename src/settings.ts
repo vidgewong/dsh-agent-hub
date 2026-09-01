@@ -14,15 +14,15 @@
 import z from '@deepseek-ai/schemastery'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
-import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from './namespace.ts'
+import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL, type LoopEngineId } from './namespace.ts'
 
 export { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from './namespace.ts'
 
-/** The installed engine driving new Agent turns. */
-export const LOOP_ENGINE_IDS = ['in-process', 'claude-code', 'codex', 'pi'] as const
-
-/** Installed agent loop engine id. */
-export type LoopEngineId = (typeof LOOP_ENGINE_IDS)[number]
+// The engine ids live in the zero-import `./namespace.ts` and are re-exported
+// here so the node half keeps one import site for everything settings-shaped.
+// The browser half must import them from `./namespace.ts` directly: a value
+// import of this module would pull `dsh-settings` into the client bundle.
+export { LOOP_ENGINE_IDS, type LoopEngineId } from './namespace.ts'
 
 /** Stored and composed loop engine selection. */
 export interface LoopEngineSettings {

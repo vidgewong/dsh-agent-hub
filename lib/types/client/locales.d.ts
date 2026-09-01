@@ -20,18 +20,20 @@ export interface LoopEngineKey {
     showInComposerLabel: string;
     /** Unavailable-state message. */
     unavailable: string;
-    /** Notice shown when the selection would interrupt running agents. */
+    /** Notice explaining that the choice binds at session creation. */
     switchNotice: string;
+    /** Composer tooltip: picking a different engine starts a new session. */
+    switchCreatesSession: string;
+    /** Tooltip of the read-only composer seat: this session's engine is already fixed. */
+    boundNotice: string;
+    /** Composer label while this session's engine is still being read. */
+    engineResolving: string;
+    /** Composer label when this session's engine could not be read. */
+    engineUnknown: string;
+    /** Composer tooltip when the engine could not be read: picking still starts a session. */
+    engineUnknownNotice: string;
     /** Saving state label. */
     saving: string;
-    /** Confirmation dialog title. */
-    confirmTitle: string;
-    /** Confirmation dialog body. */
-    confirmBody: string;
-    /** Confirmation action label. */
-    confirmAction: string;
-    /** Cancel action label. */
-    cancelAction: string;
     /** Notice shown while the Claude Code engine owns the slot: model selection is native. */
     claudeModelNotice: string;
 }
