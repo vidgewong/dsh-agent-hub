@@ -43,6 +43,16 @@ export declare function hasManagedBlock(text: string): boolean;
  * present, which also upgrades a legacy engine-tagged marker from the era when
  * the block encoded the selected engine.
  *
+ * This is a belt-and-braces layer, not the mechanism that disables the base
+ * loop. Disabling `agent-loop` is a boot-time fact and only the bundle patch can
+ * state it: the loader applies bundle layers while expanding entries, whereas
+ * this profile layer is applied afterwards and this very write happens inside
+ * apply() — by which point `AgentLoop`'s constructor has already claimed the
+ * sole AgentFactory slot. The row therefore lives in this package's own
+ * `cordis.patch.yml`, and what lands here merely re-disables an already-disabled
+ * row, which is idempotent. It is kept so a profile that pins an older bundle,
+ * or that lists `agent-loop` itself, still boots.
+ *
  * The file must always parse as a top-level YAML *array*: app-boot's
  * `parsePatchList` throws `must be a top-level YAML array of loader patch
  * entries` on anything else, which fails the whole plugin tree — including this

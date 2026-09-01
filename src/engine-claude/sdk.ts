@@ -36,6 +36,16 @@ export interface ClaudeCodeQuerySpec {
   readonly permissionMode: PermissionMode
   /** Explicit environment entries layered over the scrubbed parent environment. */
   readonly env?: Record<string, string>
+  /**
+   * Provider routing derived from dsh's own LLM configuration, when the model
+   * selection named a route this plugin could resolve.
+   *
+   * Kept separate from {@link env} because it does not merely add entries: a
+   * derived route is authoritative about which backend the child speaks, so
+   * every *other* backend's keys are removed rather than left to out-rank it.
+   * The deployment's `env` still layers on top, so an explicit override wins.
+   */
+  readonly providerEnv?: Record<string, string>
   /** Grace in milliseconds for process-tree termination. */
   readonly disposeGraceMs: number
   /** Model override for the SDK, when a selection or the deployment pins one. */
@@ -187,6 +197,12 @@ function inheritedLlmCredentials(backend: ClaudeCodeBackend): Record<string, str
  * outrank a relay's `ANTHROPIC_BASE_URL` — leaving the CLI on the wrong
  * backend even though nothing re-inherited it.
  *
+ * A derived `providerEnv` displaces inheritance entirely rather than merging
+ * with it: dsh's own configuration is a better answer than whatever shell
+ * launched the host, and a half-inherited second backend would out-rank it by
+ * the CLI's own precedence rules. So when one is present, every backend key
+ * outside it is removed and nothing is re-inherited.
+ *
  * `ANTHROPIC_MODEL` sits below `spec.env` so a deployment that pins one in
  * config still beats the dsh selection, and above the inherited value so the
  * selection beats whatever shell launched the host.
@@ -195,7 +211,8 @@ function inheritedLlmCredentials(backend: ClaudeCodeBackend): Record<string, str
  * @returns the child environment.
  */
 function claudeChildEnv(spec: ClaudeCodeQuerySpec): Record<string, string> {
-  const selected = inheritedLlmCredentials(spec.backend ?? 'auto')
+  const derived = spec.providerEnv
+  const selected = derived ?? inheritedLlmCredentials(spec.backend ?? 'auto')
   const env: Record<string, string> = { ...scrubbedParentEnv() }
   for (const group of BACKEND_ENV_GROUPS) {
     for (const key of group.keys) {
@@ -283,8 +300,13 @@ export function claudeQueryOptions(
   const childEnv = claudeChildEnv(spec)
   const routing = backendDiagnostic(childEnv, spec.backend ?? 'auto')
   if (routing !== undefined) report(routing)
-  const mismatch = modelDiagnostic(spec.model, spec.provider, childEnv)
-  if (mismatch !== undefined) report(mismatch)
+  // A derived route cannot be a mismatch: the backend was built *from* the
+  // provider the model belongs to, so the catalog check below would only ever
+  // report the pairing it just constructed.
+  if (spec.providerEnv === undefined) {
+    const mismatch = modelDiagnostic(spec.model, spec.provider, childEnv)
+    if (mismatch !== undefined) report(mismatch)
+  }
   return {
     abortController: controller,
     cwd: spec.cwd,

@@ -1,3 +1,22 @@
+# Bundle patch layer of @vidge/dsh-loop-engine, applied when the loader expands
+# this bundle — before any plugin's apply() runs. Both rows must live here.
+#
+# Disabling `agent-loop` is a BOOT-TIME fact, not something this plugin can do
+# at runtime. The harness admits exactly one AgentFactory, and the base loop's
+# constructor claims it via `ctx.agents.setFactory(this)` while the loader is
+# still expanding entries — strictly before `loop-engine` applies. A profile
+# that leaves the row enabled therefore fails the whole plugin tree with
+# "an agent factory is already registered" and never reaches the router. The
+# managed block this plugin writes into the profile's own cordis.patch.yml
+# cannot substitute: that layer is applied after the bundle, and the write
+# itself happens in apply(), by which point AgentLoop has already registered.
+#
+# The base loop is not lost by being disabled here — `mountBaseLoop` hosts it
+# behind the router as the `in-process` engine, through a context that
+# redirects its setFactory into router registration.
+- id: agent-loop
+  disabled: true
+
 - insert:
     - id: loop-engine
       name: '@vidge/dsh-loop-engine'

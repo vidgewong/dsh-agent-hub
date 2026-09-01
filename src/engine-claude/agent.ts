@@ -36,6 +36,7 @@ import {
 import { serializeHistory } from '../driver-core/prompt.ts'
 import { approvalReason, resolveSessionPermission } from './permission.ts'
 import { DEFAULT_PERMISSION_MODE, claudeQueryOptions, type ClaudeCodeQuerySpec } from './sdk.ts'
+import { deriveProviderEnv } from './provider-env.ts'
 import {
   invokedSkillNames,
   isSkillName,
@@ -538,10 +539,20 @@ export class ClaudeCodeAgent implements Agent {
     const diagnostics: string[] = []
     try {
       const selected = this.resolveModel()
+      // The route the selection names is dsh's own; derive the child's provider
+      // environment from it rather than from whatever shell launched the host,
+      // which a desktop-launched dsh does not have. Passed as `providerEnv` so
+      // it displaces inheritance outright instead of merging with a stale
+      // backend that would out-rank it; the deployment's `env` still layers on
+      // top. When the route cannot be derived this is undefined and the child
+      // environment is re-inherited exactly as before.
+      const derived = await deriveProviderEnv(this.loopCtx, selected.provider)
+      if (derived !== undefined) diagnostics.push(derived.diagnostic)
       const options = claudeQueryOptions({
         cwd,
         ...this.queryPermission(),
         env: this.config.env,
+        ...derived === undefined ? {} : { providerEnv: derived.env },
         backend: this.config.backend,
         disposeGraceMs: this.config.disposeGraceMs,
         ...selected.model === undefined ? {} : { model: selected.model },

@@ -23,6 +23,16 @@ export interface ClaudeCodeQuerySpec {
     readonly permissionMode: PermissionMode;
     /** Explicit environment entries layered over the scrubbed parent environment. */
     readonly env?: Record<string, string>;
+    /**
+     * Provider routing derived from dsh's own LLM configuration, when the model
+     * selection named a route this plugin could resolve.
+     *
+     * Kept separate from {@link env} because it does not merely add entries: a
+     * derived route is authoritative about which backend the child speaks, so
+     * every *other* backend's keys are removed rather than left to out-rank it.
+     * The deployment's `env` still layers on top, so an explicit override wins.
+     */
+    readonly providerEnv?: Record<string, string>;
     /** Grace in milliseconds for process-tree termination. */
     readonly disposeGraceMs: number;
     /** Model override for the SDK, when a selection or the deployment pins one. */
