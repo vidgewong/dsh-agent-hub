@@ -31,11 +31,9 @@
  * @module dsh-agent-hub/client/composer
  */
 import { type JSX } from 'react';
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-store';
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
-import type { LoopEngineStore, LoopEngineState } from './store.ts';
 import type { EngineRpc } from './engine-rpc.ts';
-import type { LoopEngineId } from '../settings.ts';
+import type { LoopEngineId } from '../namespace.ts';
 import type { en } from './locales.ts';
 /** Creates a session on a caller-chosen id and brings it to the foreground. */
 export interface SessionSwitcher {
@@ -48,16 +46,10 @@ export interface SessionSwitcher {
 }
 /** Injected dependencies of {@link LoopEngineComposerSelect} (slot `inject`). */
 export interface LoopEngineComposerSelectInjected {
-    /** The settings store, for the composer-visibility toggle and the default engine. */
-    controller: LoopEngineStore;
     /** Reads a session's true engine from the node half. */
     rpc: EngineRpc;
     /** Creates and opens a session bound to a chosen engine. */
     switcher: SessionSwitcher;
-    hooks: {
-        /** Engine snapshot bound by the UI renderer as useSnapshot. */
-        snapshot: SnapshotStore<LoopEngineState>;
-    };
     /** Composer copy bound to the loop engine dictionaries. */
     t: (key: keyof typeof en) => string;
 }

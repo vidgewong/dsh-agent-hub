@@ -1,34 +1,32 @@
 /**
- * Loop engine settings plugin, browser half. Registers the "Loop engine"
- * page under the settings section slot once the settings shell declares it,
- * binding one store to the duplicated `agent-loop-engine` settings scope.
+ * Loop engine plugin, browser half. Surfaces the per-session agent loop engine
+ * in two seats — the composer picker (which switches engine by starting a new
+ * session) and a static badge in the open session's header — each colour-coded
+ * by engine so a session's kernel is legible at a glance. There is no settings
+ * page: the engine is a per-session fact, not a global default worth a knob.
  * Export discipline: packages/client/AGENTS.md.
  * @module dsh-agent-hub/client
  */
 
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-// Type-only: pulls the shell's SlotMap merge (the 'settings.section' entry).
-import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls ui-conversation's SlotMap merge, which declares the
-// `conversation.input.right` seat the composer picker registers at.
+// `conversation.input.right` composer seat and the
+// `conversation.session.header.actions` header seat this plugin registers at.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import { LoopEngineSection } from './LoopEngineSection.tsx'
-import type { LoopEngineSectionInjected } from './LoopEngineSection.tsx'
 import { LoopEngineComposerSelect } from './LoopEngineComposerSelect.tsx'
 import type { LoopEngineComposerSelectInjected, SessionSwitcher } from './LoopEngineComposerSelect.tsx'
+import { LoopEngineHeaderBadge } from './LoopEngineHeaderBadge.tsx'
+import type { LoopEngineHeaderBadgeInjected } from './LoopEngineHeaderBadge.tsx'
 import { EngineRpc, type ConnectionLike } from './engine-rpc.ts'
 import { sessionLocation } from './session-location.ts'
 import type { SessionListLike, WorkspaceViewLike } from './session-location.ts'
-import { LoopEngineStore, decodeLoopEngine } from './store.ts'
 import { en, zh, type LoopEngineKey } from './locales.ts'
-import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../namespace.ts'
-import type { LoopEngineId, LoopEngineSettings } from '../settings.ts'
+import type { LoopEngineId } from '../namespace.ts'
 
-export type { LoopEngineSectionInjected, LoopEngineSectionProps } from './LoopEngineSection.tsx'
 export type { LoopEngineComposerSelectInjected, LoopEngineComposerSelectProps, SessionSwitcher } from './LoopEngineComposerSelect.tsx'
-export type { LoopEngineState } from './store.ts'
+export type { LoopEngineHeaderBadgeInjected, LoopEngineHeaderBadgeProps } from './LoopEngineHeaderBadge.tsx'
 
 /**
  * The client session service this plugin drives, declared structurally so the
@@ -62,7 +60,7 @@ interface WorkspacesLike {
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** The Loop engine settings page copy. */
+    /** The loop engine display copy (labels, tooltips). */
     'settings.loop-engine': LoopEngineKey
   }
 }
@@ -70,59 +68,30 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 /** Dictionary namespace owned by this plugin. */
 const NS = 'settings.loop-engine'
 
-/** Required services (cordis fiber inject). The target slot is declared by
- * ui-settings' apply; registration depends on it through `slots.inject()`. */
-export const inject = ['slots', 'locale', 'settingsScope']
+/** Required services (cordis fiber inject). */
+export const inject = ['slots', 'locale']
 
 /**
- * Register the Loop engine section once the `settings.section` declaration is
- * on the ledger and bind its store to the duplicated settings scope.
+ * Register the composer engine picker and the session-header engine badge, both
+ * reading each session's true engine over the plugin's RPC channel.
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'loop-engine: copy dictionaries')
 
-  const scope = ctx.settingsScope.bind<LoopEngineSettings>({
-    namespace: LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL,
-    decode: decodeLoopEngine,
-  })
-  const controller = new LoopEngineStore(scope)
-  ctx.effect(() => {
-    controller.load()
-    return () => { controller.dispose() }
-  }, 'loop-engine: store lifecycle')
+  const t = ctx.locale.bind(NS) as LoopEngineComposerSelectInjected['t']
 
-  const t = ctx.locale.bind(NS) as LoopEngineSectionInjected['t']
-  const injected = (): LoopEngineSectionInjected => ({
-    controller,
-    hooks: { snapshot: controller.store },
-    t,
-  })
-
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
-    name: 'settings.section',
-    id: 'loop-engine',
-    order: 30,
-    label: () => t('nav'),
-    inject: injected,
-  }, LoopEngineSection))
-
-  // The composer's loop-engine control: registered at the tool-row seat beside
-  // the model select. It names the engine the open session is *actually* on,
-  // read from the node half over the plugin's own RPC channel, and switching it
-  // creates a new session rather than pretending to change this one — a
-  // session's engine is fixed inside `createAgent`, which the harness fires
-  // eagerly at session-open.
+  // Both seats read the engine a session is *actually* on, from the node half
+  // over the plugin's own RPC channel. A session's engine is chosen inside
+  // `createAgent`, which the harness fires eagerly at session-open, so a control
+  // backed by any settings value would name "the last thing picked anywhere"
+  // while the session ran something else.
   //
   // `connection` is injected here rather than read off the root context: a bare
   // `ctx.get` at apply time can run before the connection plugin provides the
-  // service, and would then pin an undefined RPC for the life of the page. It
-  // is not in the plugin-level `inject` because the settings section must still
-  // mount on a profile that has no Connection.
-  //
-  // There is deliberately no session-header badge: the composer seat already
-  // carries the per-session engine, and the settings value it would otherwise
-  // read means only "the default for sessions that pick nothing".
+  // service, and would then pin an undefined RPC for the life of the page. It is
+  // not in the plugin-level `inject` because both seats must still mount on a
+  // profile that has no Connection (the badge hides, the picker goes read-only).
   ctx.inject(['slots', 'conversation', 'connection'], (scope: ClientContext) => {
     const rpc = new EngineRpc(scope.get('connection') as ConnectionLike | undefined)
 
@@ -153,21 +122,25 @@ export function apply(ctx: ClientContext): void {
       },
     }
 
-    const composerInjected = (): LoopEngineComposerSelectInjected => ({
-      controller,
-      rpc,
-      switcher,
-      hooks: { snapshot: controller.store },
-      t,
-    })
-    scope.effect(() => {
-      return scope.slots.register({
-        name: 'conversation.input.right',
-        id: 'loop-engine',
-        order: 0,
-        locale: NS,
-        inject: composerInjected,
-      }, LoopEngineComposerSelect)
-    }, 'loop-engine: composer engine select')
+    const composerInjected = (): LoopEngineComposerSelectInjected => ({ rpc, switcher, t })
+    const badgeInjected = (): LoopEngineHeaderBadgeInjected => ({ rpc, t })
+
+    scope.effect(() => scope.slots.register({
+      name: 'conversation.input.right',
+      id: 'loop-engine',
+      order: 0,
+      locale: NS,
+      inject: composerInjected,
+    }, LoopEngineComposerSelect), 'loop-engine: composer engine select')
+
+    // The header badge is static session context, so it takes a negative order
+    // to render before the title's interactive actions.
+    scope.effect(() => scope.slots.register({
+      name: 'conversation.session.header.actions',
+      id: 'loop-engine',
+      order: -100,
+      locale: NS,
+      inject: badgeInjected,
+    }, LoopEngineHeaderBadge), 'loop-engine: session header engine badge')
   })
 }

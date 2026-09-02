@@ -36,11 +36,10 @@ import {
   IconChevronDownOutline14,
   Menu,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
-import type { LoopEngineStore, LoopEngineState } from './store.ts'
 import type { EngineRpc } from './engine-rpc.ts'
-import type { LoopEngineId } from '../settings.ts'
+import { engineColor, engineLabelKey } from './engine-visuals.ts'
+import type { LoopEngineId } from '../namespace.ts'
 import type { en } from './locales.ts'
 
 /** Creates a session on a caller-chosen id and brings it to the foreground. */
@@ -55,16 +54,10 @@ export interface SessionSwitcher {
 
 /** Injected dependencies of {@link LoopEngineComposerSelect} (slot `inject`). */
 export interface LoopEngineComposerSelectInjected {
-  /** The settings store, for the composer-visibility toggle and the default engine. */
-  controller: LoopEngineStore
   /** Reads a session's true engine from the node half. */
   rpc: EngineRpc
   /** Creates and opens a session bound to a chosen engine. */
   switcher: SessionSwitcher
-  hooks: {
-    /** Engine snapshot bound by the UI renderer as useSnapshot. */
-    snapshot: SnapshotStore<LoopEngineState>
-  }
   /** Composer copy bound to the loop engine dictionaries. */
   t: (key: keyof typeof en) => string
 }
@@ -97,15 +90,16 @@ const ENGINE_OPTIONS: readonly { value: LoopEngineId; key: keyof typeof en }[] =
   { value: 'pi', key: 'enginePi' },
 ]
 
-/** Locale key of one engine's option label. */
-function engineLabelKey(engine: LoopEngineId): keyof typeof en {
-  switch (engine) {
-    case 'claude-code': return 'engineClaudeCode'
-    case 'codex': return 'engineCodex'
-    case 'pi': return 'enginePi'
-    default: return 'engineInProcess'
-  }
-}
+/** The colour dot marking an engine's identity in the trigger and menu list. */
+const dot = (color: string): CSSProperties => ({
+  boxSizing: 'border-box',
+  width: 8,
+  height: 8,
+  borderRadius: 999,
+  background: color,
+  flex: 'none',
+  display: 'inline-block',
+})
 
 /** Compact quiet trigger, one row tall like the model pill. */
 const trigger: CSSProperties = {
@@ -152,8 +146,7 @@ const frozen: CSSProperties = {
  *   toggle hides it.
  */
 export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): JSX.Element | null {
-  const { rpc, switcher, useSnapshot, session, t } = props as ComposerFace
-  const { status, showInComposer } = useSnapshot((snapshot: LoopEngineState) => snapshot)
+  const { rpc, switcher, session, t } = props as ComposerFace
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
@@ -184,12 +177,11 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
     return () => { abort.abort() }
   }, [rpc, sessionId])
 
-  // Hidden only when the settings toggle clears the seat, or before the
-  // settings scope has settled enough to know that. An unknown engine must NOT
-  // hide the control: the picker is how a user reaches another engine at all,
-  // and removing it on a failed read leaves them with no way to switch and no
-  // sign anything went wrong.
-  if (status === 'loading' || !showInComposer) return null
+  // The picker is always available on the chat page now — the engine is a
+  // per-session fact worth surfacing, and an unknown engine must NOT hide the
+  // control: it is how a user reaches another engine at all, and removing it on
+  // a failed read leaves them with no way to switch and no sign anything went
+  // wrong.
 
   // Three display states: the resolved engine, "still reading", and "could not
   // read". The last two keep the picker live — creating a session on a chosen
@@ -208,6 +200,7 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
   if (!rpc.available) {
     return (
       <span style={frozen} title={t('boundNotice')}>
+        {engine !== undefined && <span style={dot(engineColor(engine))} />}
         {label}
       </span>
     )
@@ -227,7 +220,15 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
     <Menu
       open={open}
       onClose={() => { setOpen(false) }}
-      items={ENGINE_OPTIONS.map(option => ({ id: option.value, label: t(option.key) }))}
+      items={ENGINE_OPTIONS.map(option => ({
+        id: option.value,
+        label: (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <span style={dot(engineColor(option.value))} />
+            {t(option.key)}
+          </span>
+        ),
+      }))}
       selectedId={engine}
       onSelect={onSelect}
       align="start"
@@ -244,6 +245,7 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
           title={notice}
           onClick={() => { setOpen(!open) }}
         >
+          {engine !== undefined && <span style={dot(engineColor(engine))} />}
           {label}
           <IconChevronDownOutline14 size={14} />
         </button>
