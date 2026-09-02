@@ -751,12 +751,12 @@ describe('configuration validation', () => {
   })
 })
 
-describe('model resolution', () => {
-  /** Mount the default-model service the dsh base layer normally provides. */
-  function withDefaultModel(ctx: Context, selection: { provider: string; model: string }): void {
-    ctx.provide('agentDefaultModel', { currentSelection: () => selection }, true)
-  }
+/** Mount the default-model service the dsh base layer normally provides. */
+function withDefaultModel(ctx: Context, selection: { provider: string; model: string }): void {
+  ctx.provide('agentDefaultModel', { currentSelection: () => selection }, true)
+}
 
+describe('model resolution', () => {
   /** Run one turn and return the options the SDK query was called with. */
   async function queriedOptions(ctx: Context, sessionId: string, options: Record<string, unknown> = {}): Promise<Options> {
     queryMock.mockImplementation(() => stream([successResult()]))
@@ -797,7 +797,11 @@ describe('model resolution', () => {
     }
   })
 
-  it('records the resolved model in the request header', async () => {
+  it('records the resolved route in the request header', async () => {
+    // The header's provider must be the REAL dsh route, not the engine name.
+    // api-proxy re-reads this field as "the model this session is on" and
+    // resolves it against the llm registry; an engine name is not a registered
+    // provider, so writing one there locked the composer after every turn.
     const ctx = await harness()
     try {
       withDefaultModel(ctx, { provider: 'copilot-proxy', model: 'claude-opus-4.7' })
@@ -809,7 +813,7 @@ describe('model resolution', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
       await agent.whenIdle()
       expect(agent.session.events.filter(e => e.type === 'request/header')[0]).toMatchObject({
-        data: { header: { config: { provider: 'claude-code', model: 'claude-opus-4.7' } } },
+        data: { header: { config: { provider: 'copilot-proxy', model: 'claude-opus-4.7' } } },
       })
     } finally {
       await ctx.fiber.dispose()
@@ -851,6 +855,182 @@ describe('model resolution', () => {
       }, true)
       const options = await queriedOptions(ctx, 'faulting-model-s')
       expect('model' in options).toBe(false)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('per-session model selection', () => {
+  /**
+   * The mutable per-agent state api-proxy keeps: the pick a session currently
+   * holds, and the snapshot taken of it when the prompt was assembled.
+   */
+  interface Selection {
+    current?: { provider: string; model: string } | undefined
+    assembled?: { provider: string; model: string } | undefined
+  }
+
+  /**
+   * Install the listener pair api-proxy installs per agent, coupling a mutable
+   * selection to prompt assembly and request routing. Reproduced rather than
+   * imported so the test states the contract the engine depends on.
+   */
+  function installSelection(ctx: Context, selection: Selection): void {
+    ctx.on('agent/pre-step', async (_payload, next) => next())
+    ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+      const snapshot = selection.current
+      const assembled = await next()
+      selection.assembled = snapshot
+      return assembled
+    })
+    ctx.on('agent/request', async (_payload, next) => {
+      const resolved = await next()
+      const picked = selection.assembled
+      return picked === undefined ? resolved : { ...resolved, ...picked }
+    })
+  }
+
+  /** Run one turn on an agent whose setup installs the selection pair. */
+  async function turnWithSelection(
+    ctx: Context,
+    sessionId: string,
+    selection: Selection,
+  ): Promise<{ agent: Awaited<ReturnType<typeof ctx.agents.create>>['agent']; options: Options }> {
+    queryMock.mockImplementation(() => stream([successResult()]))
+    const { agent } = await ctx.agents.create({
+      sessionId: SessionId(sessionId),
+      meta: { cwd: process.cwd() },
+      setup: (agentCtx: Context) => {
+        installSelection(agentCtx, selection)
+        return undefined
+      },
+    })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    return { agent, options: queryMock.mock.calls[0]![0].options }
+  }
+
+  it('runs the model this session selected, not the global default', async () => {
+    // The defect this fixes: the engine read only its options and the global
+    // default, so two sessions on different models both ran the default.
+    const ctx = await harness()
+    try {
+      withDefaultModel(ctx, { provider: 'amazon-bedrock', model: 'claude-sonnet-4.6' })
+      const { agent, options } = await turnWithSelection(ctx, 'per-session-s', {
+        current: { provider: 'copilot-proxy-anthropic', model: 'claude-opus-5' },
+      })
+      expect(options.model).toBe('claude-opus-5')
+      expect(agent.session.events.filter(e => e.type === 'request/header')[0]).toMatchObject({
+        data: { header: { config: { provider: 'copilot-proxy-anthropic', model: 'claude-opus-5' } } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('beats the create-time seed the session was opened with', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([successResult()]))
+      const selection = { current: { provider: 'copilot-proxy-anthropic', model: 'claude-haiku-4.5' } }
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('seed-beaten-s'),
+        meta: { cwd: process.cwd() },
+        agentOptions: { provider: 'amazon-bedrock', model: 'claude-opus-4.6' },
+        setup: (agentCtx: Context) => {
+          installSelection(agentCtx, selection)
+          return undefined
+        },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      expect(queryMock.mock.calls[0]![0].options.model).toBe('claude-haiku-4.5')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('re-logs the header when the session switches route mid-conversation', async () => {
+    // The header is the log's record of what each request ran under. A switch
+    // that produced no new snapshot would misattribute every later turn.
+    const ctx = await harness()
+    try {
+      const selection: Selection = {
+        current: { provider: 'copilot-proxy-anthropic', model: 'claude-opus-5' },
+      }
+      queryMock.mockImplementation(() => stream([successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('switch-s'),
+        meta: { cwd: process.cwd() },
+        setup: (agentCtx: Context) => {
+          installSelection(agentCtx, selection)
+          return undefined
+        },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'one' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      selection.current = { provider: 'amazon-bedrock', model: 'claude-sonnet-4.6' }
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'two' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const headers = agent.session.events.filter(e => e.type === 'request/header')
+      expect(headers).toHaveLength(2)
+      expect(headers[0]).toMatchObject({
+        data: {
+          header: { config: { provider: 'copilot-proxy-anthropic', model: 'claude-opus-5' } },
+          reason: 'initial',
+        },
+      })
+      expect(headers[1]).toMatchObject({
+        data: {
+          header: { config: { provider: 'amazon-bedrock', model: 'claude-sonnet-4.6' } },
+          reason: 'change',
+        },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('logs one header for a session that never switches', async () => {
+    const ctx = await harness()
+    try {
+      withDefaultModel(ctx, { provider: 'copilot-proxy', model: 'claude-opus-4.7' })
+      queryMock.mockImplementation(() => stream([successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('stable-header-s'),
+        meta: { cwd: process.cwd() },
+      })
+      for (const text of ['one', 'two', 'three']) {
+        agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+        await agent.whenIdle()
+      }
+      expect(agent.session.events.filter(e => e.type === 'request/header')).toHaveLength(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('degrades to the layers below when a host listener throws', async () => {
+    // A host listener is not the engine's to trust with the turn: a faulting
+    // one costs the session its per-session selection, not its turn.
+    const ctx = await harness()
+    try {
+      withDefaultModel(ctx, { provider: 'copilot-proxy', model: 'claude-opus-4.7' })
+      queryMock.mockImplementation(() => stream([successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('faulting-listener-s'),
+        meta: { cwd: process.cwd() },
+        setup: (agentCtx: Context) => {
+          agentCtx.on('agent/request', () => { throw new Error('selection registry unavailable') })
+          return undefined
+        },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      expect(agent.session.events.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
+      expect(queryMock.mock.calls[0]![0].options.model).toBe('claude-opus-4.7')
     } finally {
       await ctx.fiber.dispose()
     }

@@ -17,13 +17,13 @@ import type {
   InboxTarget,
   PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
-import { Inbox, agentEvents } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
+import { Inbox, agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
+import type { ContentBlock, LlmCallConfig, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
-import { canonicalHeader } from '@deepseek-ai/dsh-session'
+import { canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SDKResultError } from '@anthropic-ai/claude-agent-sdk'
 import type { ResolvedConfig } from './types.ts'
@@ -45,7 +45,13 @@ import {
   type SkillsService,
 } from '../driver-core/skill-inject.ts'
 
-/** Provider route label used for logged header snapshots and message provenance. */
+/**
+ * Engine label stamped on each assistant message's `source.provider`.
+ *
+ * This is provenance, not routing: it says which engine produced the message,
+ * and nothing resolves it against `ctx.llm`. The *header*'s provider is a
+ * different value entirely — see {@link ClaudeCodeAgent.assertRequestHeader}.
+ */
 const PROVIDER = 'claude-code'
 
 /** The official SDK's `query`, resolved on first use. */
@@ -84,11 +90,22 @@ async function loadClaudeQuery(): Promise<OfficialQuery> {
   return claudeQueryPromise
 }
 /**
- * Model label logged when the deployment pins no model: Claude Code owns its
- * model natively, so the web session's advisory model selection is deliberately
- * not mirrored into the header (it never drives a query).
+ * Model label logged when no layer named a model: Claude Code then owns its
+ * model natively, and the header still has to say something.
  */
 const NATIVE_MODEL_LABEL = 'claude-code-native'
+
+/**
+ * Provider label logged beside {@link NATIVE_MODEL_LABEL} when no layer named a
+ * route either.
+ *
+ * A header must carry a provider, and every honest candidate is wrong here:
+ * naming a real route would claim a backend the child was never pointed at, and
+ * an empty string reads as a missing field. So the header names the engine, and
+ * the composer stays blocked until a model is picked — which is correct, because
+ * at this point dsh genuinely does not know where the turn went.
+ */
+const NATIVE_PROVIDER_LABEL = PROVIDER
 
 /** Minimal shape of the approval service (inline to avoid a peer dep on @deepseek-ai/dsh-user-approval). */
 interface ApprovalService {
@@ -101,7 +118,7 @@ interface AgentDefaultModelService {
 }
 
 /** Which layer chose the model the child runs. */
-type ModelSource = 'session' | 'default' | 'config' | 'native'
+type ModelSource = 'selection' | 'session' | 'default' | 'config' | 'native'
 
 /** The model one query runs on, and where the choice came from. */
 interface ResolvedModel {
@@ -488,19 +505,35 @@ export class ClaudeCodeAgent implements Agent {
   }
 
   /**
-   * Resolve the model one query runs on, session choice first.
+   * Resolve the model one query runs on, per-session selection first.
    *
-   * The web surface sets `AgentOptions.model` when a session picks a model, and
-   * `agentDefaultModel` holds the global default; reading both is what makes
-   * the dsh model picker mean something for this engine. The service is
-   * optional — a minimal profile may not mount it — so it is resolved through
-   * `ctx.get` rather than `inject`, and a faulting provider degrades to the
-   * next layer instead of failing the turn.
+   * The layers, in precedence order:
    *
+   *  1. **The `agent/request` waterfall.** This is the seam the dsh model
+   *     picker actually drives. api-proxy installs `installModelSelection` on
+   *     every agent's own context, which listens on `system-prompt/assemble`
+   *     to *snapshot* the session's selection and on `agent/request` to *apply*
+   *     the snapshot — two stages, so a mid-turn switch lands on a later step
+   *     rather than splitting the prompt from the route. Both must be
+   *     dispatched, and in that order: the request listener reads
+   *     `selection.assembled`, which only the assemble listener writes, so
+   *     dispatching the request waterfall alone yields nothing.
+   *  2. `AgentOptions.model` — the create-time seed.
+   *  3. `agentDefaultModel` — the global default.
+   *  4. The deployment's pinned `config.model`.
+   *  5. Nothing, leaving the CLI on its own model.
+   *
+   * Every layer is optional and every failure degrades to the next one: a
+   * minimal profile mounts neither service, and a listener that throws must
+   * cost this session its turn no more than a missing service does.
+   *
+   * @param signal - the step's cancellation signal, forwarded to prompt assembly.
    * @returns the chosen id (undefined leaves the CLI on its own default),
    * its provider route, and the layer that chose it.
    */
-  private resolveModel(): ResolvedModel {
+  private async resolveModel(signal: AbortSignal): Promise<ResolvedModel> {
+    const selected = await this.selectionFromWaterfall(signal)
+    if (selected !== undefined) return selected
     if (this.options.model !== undefined) {
       return { model: this.options.model, provider: this.options.provider, source: 'session' }
     }
@@ -521,23 +554,95 @@ export class ClaudeCodeAgent implements Agent {
     return { model: undefined, provider: undefined, source: 'native' }
   }
 
-  /** Model label recorded in the request header for one lifecycle. */
-  private modelLabel(): string {
-    return this.resolveModel().model ?? NATIVE_MODEL_LABEL
+  /**
+   * Ask the host what this session is routed to, through the two waterfalls
+   * that carry a per-session selection.
+   *
+   * The seed handed to `agent/request` is the same one the in-process loop
+   * seeds with — the agent's own options — so a host that installs no listener
+   * gets its own answer back and this returns undefined, leaving the layers
+   * below untouched. A listener that replaces it wins.
+   *
+   * The assemble pass is dispatched for its *side effect* on the selection
+   * state; its returned prompt is discarded, because Claude Code builds its own
+   * prompt and dsh's assembly never reaches the child. That makes this a real
+   * (if small) cost per step: the host's prompt providers run and their output
+   * is dropped. It is the price of reaching a selection whose only publisher is
+   * that listener pair.
+   *
+   * @param signal - the step's cancellation signal.
+   * @returns the selection when a listener supplied one, else undefined.
+   */
+  private async selectionFromWaterfall(signal: AbortSignal): Promise<ResolvedModel | undefined> {
+    const phase = this.phase
+    /* v8 ignore start -- step() is the sole caller and establishes the running phase before resolving */
+    /* v8 ignore next -- step() is the sole caller and establishes the running phase before resolving */
+    if (phase.kind !== 'running') return undefined
+    /* v8 ignore stop */
+    const { turn, step } = phase
+    const seed: LlmCallConfig = {
+      provider: this.options.provider ?? '',
+      model: this.options.model ?? '',
+    }
+    try {
+      const systemPrompt = this.loopCtx.get('systemPrompt')
+      if (systemPrompt !== undefined) {
+        await systemPrompt.assemble(assembleContextFor(this, signal))
+      }
+      const proposed = await this.dispatch.waterfall(
+        'agent/request',
+        { turn, step, signal },
+        () => Promise.resolve(seed),
+      )
+      if (proposed.model === '' || proposed.provider === '') return undefined
+      if (proposed.provider === seed.provider && proposed.model === seed.model) return undefined
+      return { model: proposed.model, provider: proposed.provider, source: 'selection' }
+    } catch (error: unknown) {
+      // A host listener is not this engine's to trust with the turn. Degrading
+      // costs the session its per-session selection; propagating would cost it
+      // the turn, on a path a minimal profile does not even have.
+      this.ctx.logger.warn('claude-code: per-session model selection unavailable: %s', error)
+      return undefined
+    }
   }
 
-  /** Append the request header snapshot once per loop instance. */
-  private assertRequestHeader(): void {
-    if (this.requestHeaderLogged) return
+  /**
+   * Append the request header, and re-append it whenever the route changes.
+   *
+   * The provider written here is the **real** dsh route (`copilot-proxy`,
+   * `amazon-bedrock`, …), not this engine's name. That is not cosmetic:
+   * api-proxy re-reads this field on every read as "the model this session is
+   * on", resolves it against `ctx.llm.listProviders()`, and locks the composer
+   * when the name is not a registered provider — so writing the engine name
+   * here made every session demand a fresh model pick after each turn. The
+   * engine that ran the turn is recorded in the `*.loop-engine.json` sidecar,
+   * which is where per-session engine provenance already lives.
+   *
+   * Re-logging on change mirrors the in-process loop: the header is the log's
+   * record of what each request ran under, so a mid-session model switch has to
+   * produce a new snapshot or the log misattributes every later turn.
+   *
+   * @param selected - the model resolved for the step about to run.
+   */
+  private noteRequestHeader(selected: ResolvedModel): void {
     const header = canonicalHeader({
-      config: { provider: PROVIDER, model: this.modelLabel() },
+      config: {
+        provider: selected.provider ?? NATIVE_PROVIDER_LABEL,
+        model: selected.model ?? NATIVE_MODEL_LABEL,
+      },
     })
     const baseline = this.session.requestHeader()
-    this.session.append('request/header', {
-      header,
-      reason: baseline === undefined ? 'initial' : 'resume',
-    })
-    this.requestHeaderLogged = true
+    if (!this.requestHeaderLogged) {
+      this.session.append('request/header', {
+        header,
+        reason: baseline === undefined ? 'initial' : 'resume',
+      })
+      this.requestHeaderLogged = true
+      return
+    }
+    if (baseline === undefined || !headerEquals(baseline, header)) {
+      this.session.append('request/header', { header, reason: 'change' })
+    }
   }
 
   /** Run one Claude Code query for the current step and map its transcript into the session log. */
@@ -559,7 +664,12 @@ export class ClaudeCodeAgent implements Agent {
       throw new Error(`agent "${this.id}": cannot derive a prompt from an empty session log`)
     }
     /* v8 ignore stop */
-    this.assertRequestHeader()
+    // Resolve the route BEFORE the header is written: the header records the
+    // route this step runs on, so a resolution that happened after it would
+    // log the previous step's answer.
+    const selected = await this.resolveModel(signal)
+    signal.throwIfAborted()
+    this.noteRequestHeader(selected)
     signal.throwIfAborted()
 
     const controller = new AbortController()
@@ -574,7 +684,6 @@ export class ClaudeCodeAgent implements Agent {
     signal.addEventListener('abort', cancel, { once: true })
     const diagnostics: string[] = []
     try {
-      const selected = this.resolveModel()
       // The route the selection names is dsh's own; derive the child's provider
       // environment from it rather than from whatever shell launched the host,
       // which a desktop-launched dsh does not have. Passed as `providerEnv` so

@@ -93,23 +93,72 @@ export declare class ClaudeCodeAgent implements Agent {
     /** Open one turn before claiming its first proposed step. */
     private turn;
     /**
-     * Resolve the model one query runs on, session choice first.
+     * Resolve the model one query runs on, per-session selection first.
      *
-     * The web surface sets `AgentOptions.model` when a session picks a model, and
-     * `agentDefaultModel` holds the global default; reading both is what makes
-     * the dsh model picker mean something for this engine. The service is
-     * optional — a minimal profile may not mount it — so it is resolved through
-     * `ctx.get` rather than `inject`, and a faulting provider degrades to the
-     * next layer instead of failing the turn.
+     * The layers, in precedence order:
      *
+     *  1. **The `agent/request` waterfall.** This is the seam the dsh model
+     *     picker actually drives. api-proxy installs `installModelSelection` on
+     *     every agent's own context, which listens on `system-prompt/assemble`
+     *     to *snapshot* the session's selection and on `agent/request` to *apply*
+     *     the snapshot — two stages, so a mid-turn switch lands on a later step
+     *     rather than splitting the prompt from the route. Both must be
+     *     dispatched, and in that order: the request listener reads
+     *     `selection.assembled`, which only the assemble listener writes, so
+     *     dispatching the request waterfall alone yields nothing.
+     *  2. `AgentOptions.model` — the create-time seed.
+     *  3. `agentDefaultModel` — the global default.
+     *  4. The deployment's pinned `config.model`.
+     *  5. Nothing, leaving the CLI on its own model.
+     *
+     * Every layer is optional and every failure degrades to the next one: a
+     * minimal profile mounts neither service, and a listener that throws must
+     * cost this session its turn no more than a missing service does.
+     *
+     * @param signal - the step's cancellation signal, forwarded to prompt assembly.
      * @returns the chosen id (undefined leaves the CLI on its own default),
      * its provider route, and the layer that chose it.
      */
     private resolveModel;
-    /** Model label recorded in the request header for one lifecycle. */
-    private modelLabel;
-    /** Append the request header snapshot once per loop instance. */
-    private assertRequestHeader;
+    /**
+     * Ask the host what this session is routed to, through the two waterfalls
+     * that carry a per-session selection.
+     *
+     * The seed handed to `agent/request` is the same one the in-process loop
+     * seeds with — the agent's own options — so a host that installs no listener
+     * gets its own answer back and this returns undefined, leaving the layers
+     * below untouched. A listener that replaces it wins.
+     *
+     * The assemble pass is dispatched for its *side effect* on the selection
+     * state; its returned prompt is discarded, because Claude Code builds its own
+     * prompt and dsh's assembly never reaches the child. That makes this a real
+     * (if small) cost per step: the host's prompt providers run and their output
+     * is dropped. It is the price of reaching a selection whose only publisher is
+     * that listener pair.
+     *
+     * @param signal - the step's cancellation signal.
+     * @returns the selection when a listener supplied one, else undefined.
+     */
+    private selectionFromWaterfall;
+    /**
+     * Append the request header, and re-append it whenever the route changes.
+     *
+     * The provider written here is the **real** dsh route (`copilot-proxy`,
+     * `amazon-bedrock`, …), not this engine's name. That is not cosmetic:
+     * api-proxy re-reads this field on every read as "the model this session is
+     * on", resolves it against `ctx.llm.listProviders()`, and locks the composer
+     * when the name is not a registered provider — so writing the engine name
+     * here made every session demand a fresh model pick after each turn. The
+     * engine that ran the turn is recorded in the `*.loop-engine.json` sidecar,
+     * which is where per-session engine provenance already lives.
+     *
+     * Re-logging on change mirrors the in-process loop: the header is the log's
+     * record of what each request ran under, so a mid-session model switch has to
+     * produce a new snapshot or the log misattributes every later turn.
+     *
+     * @param selected - the model resolved for the step about to run.
+     */
+    private noteRequestHeader;
     /** Run one Claude Code query for the current step and map its transcript into the session log. */
     private step;
 }
