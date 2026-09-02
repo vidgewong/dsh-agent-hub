@@ -203,6 +203,83 @@ describe('claudeQueryOptions', () => {
     }
   })
 
+  it('keeps proxy and TLS settings on a derived route', () => {
+    // A derived route displaces the *backend* choice, which is what protects
+    // its endpoint. It must not also cost the child the settings that hold for
+    // every backend: an endpoint behind a corporate proxy or a private CA is
+    // exactly the case a derived route exists to serve.
+    const saved = { ...process.env }
+    try {
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+      process.env.HTTPS_PROXY = 'http://proxy.example:3128'
+      const options = claudeQueryOptions(spec({
+        providerEnv: {
+          ANTHROPIC_BASE_URL: 'https://litellm.example',
+          ANTHROPIC_AUTH_TOKEN: 'sk-derived',
+        },
+      }), new AbortController())
+      expect(options.env).toMatchObject({
+        ANTHROPIC_BASE_URL: 'https://litellm.example',
+        ANTHROPIC_AUTH_TOKEN: 'sk-derived',
+        NODE_TLS_REJECT_UNAUTHORIZED: '0',
+        HTTPS_PROXY: 'http://proxy.example:3128',
+      })
+    } finally {
+      process.env = saved
+    }
+  })
+
+  it('lets a derived route override an inherited shared setting', () => {
+    // The route's own answer is the more specific one: a `childEnv` naming a
+    // shared key was written for this endpoint, the shell's was not.
+    const saved = { ...process.env }
+    try {
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '1'
+      const options = claudeQueryOptions(spec({
+        providerEnv: {
+          ANTHROPIC_BASE_URL: 'https://litellm.example',
+          ANTHROPIC_AUTH_TOKEN: 'sk-derived',
+          NODE_TLS_REJECT_UNAUTHORIZED: '0',
+        },
+      }), new AbortController())
+      expect(options.env?.NODE_TLS_REJECT_UNAUTHORIZED).toBe('0')
+    } finally {
+      process.env = saved
+    }
+  })
+
+  it('forwards no other backend alongside a derived route', () => {
+    // The displacement itself: a stale selector in the parent environment
+    // out-ranks the derived endpoint by the CLI's own precedence rules.
+    const saved = { ...process.env }
+    try {
+      process.env.CLAUDE_CODE_USE_BEDROCK = '1'
+      process.env.ANTHROPIC_BEDROCK_BASE_URL = 'https://gateway.example'
+      const env = claudeQueryOptions(spec({
+        providerEnv: {
+          ANTHROPIC_BASE_URL: 'https://litellm.example',
+          ANTHROPIC_AUTH_TOKEN: 'sk-derived',
+        },
+      }), new AbortController()).env ?? {}
+      expect(env.ANTHROPIC_BASE_URL).toBe('https://litellm.example')
+      expect('CLAUDE_CODE_USE_BEDROCK' in env).toBe(false)
+      expect('ANTHROPIC_BEDROCK_BASE_URL' in env).toBe(false)
+    } finally {
+      process.env = saved
+    }
+  })
+
+  it('lets the deployment env override a derived route', () => {
+    const options = claudeQueryOptions(spec({
+      env: { ANTHROPIC_BASE_URL: 'https://pinned.example' },
+      providerEnv: {
+        ANTHROPIC_BASE_URL: 'https://litellm.example',
+        ANTHROPIC_AUTH_TOKEN: 'sk-derived',
+      },
+    }), new AbortController())
+    expect(options.env?.ANTHROPIC_BASE_URL).toBe('https://pinned.example')
+  })
+
   it('routes to a native-protocol relay when one is configured', () => {
     const saved = { ...process.env }
     try {

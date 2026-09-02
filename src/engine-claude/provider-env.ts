@@ -13,7 +13,9 @@
  *
  * Only the route's *transport* is derived. Which model runs is settled earlier
  * by the agent's own resolution (session choice, then `agentDefaultModel`), and
- * is passed in rather than re-read here.
+ * is passed in rather than re-read here. A route may also carry a `childEnv`
+ * map, which is not derived at all but forwarded verbatim — the escape hatch
+ * for what a protocol mapping cannot express.
  *
  * Everything is resolved per call. `credentials.resolve` is contractually a
  * per-call read — the store layers process env over `~/.dsh/.credentials.yaml`
@@ -51,6 +53,26 @@ interface PiAiProviderProfile {
   readonly api?: string
   /** Extra HTTP headers the route sends; forwarded to the child when present. */
   readonly headers?: Record<string, string>
+  /**
+   * Extra environment entries for the child, for this route only.
+   *
+   * Not a pi-ai field. `llm-pi-ai` validates its section against a schema whose
+   * 22 keys this is not among, but Schemastery preserves unknown keys rather
+   * than stripping them, so a route may carry one and every route that does not
+   * simply leaves it undefined.
+   *
+   * It exists because a route's transport can need more than its protocol says.
+   * An endpoint behind a private CA needs `NODE_TLS_REJECT_UNAUTHORIZED`, and
+   * the only places to put it today are the launching shell or the plugin's own
+   * `env` — both of which are process-wide, so pointing one route at a
+   * corporate gateway would disable certificate verification for every other
+   * route the host talks to, including public ones. Keyed to the route, it
+   * applies exactly where it was asked for.
+   *
+   * Values are laid over the derived ones, so a route can also correct a
+   * mapping this module got wrong for it.
+   */
+  readonly childEnv?: Record<string, string>
 }
 
 /** The `llm-pi-ai` settings section. */
@@ -121,6 +143,9 @@ function readProviderProfile(ctx: Context, provider: string): PiAiProviderProfil
  * also supports have no Claude Code equivalent, and inventing one would point
  * the child at an endpoint that cannot answer it.
  *
+ * The route's own `childEnv` is laid over both shapes last, so it can add what
+ * the protocol mapping cannot express and correct what it got wrong.
+ *
  * @param provider - the route id.
  * @param profile - the route's settings entry.
  * @param key - the resolved credential value.
@@ -132,6 +157,7 @@ function mapRouteToEnv(
   key: string,
 ): Record<string, string> | undefined {
   const headers = profile.headers ?? {}
+  const extra = profile.childEnv ?? {}
   if (BEDROCK_PROVIDER_IDS.has(provider)) {
     return {
       CLAUDE_CODE_USE_BEDROCK: '1',
@@ -142,12 +168,14 @@ function mapRouteToEnv(
       // construct. A route pointing at a corporate gateway has no real region,
       // so this is a placeholder the endpoint override makes irrelevant.
       ...'AWS_REGION' in headers ? {} : { AWS_REGION: 'us-east-1' },
+      ...extra,
     }
   }
   if (ANTHROPIC_PROVIDER_IDS.has(provider) || profile.api === 'anthropic-messages') {
     return {
       ANTHROPIC_AUTH_TOKEN: key,
       ...profile.baseURL === undefined ? {} : { ANTHROPIC_BASE_URL: profile.baseURL },
+      ...extra,
     }
   }
   return undefined
@@ -192,10 +220,15 @@ export async function deriveProviderEnv(
 
   const env = mapRouteToEnv(provider, profile, key)
   if (env === undefined) return undefined
+  // Names only. This line is appended to the session log, and a route's
+  // `childEnv` is operator-supplied — it may hold a token as readily as a TLS
+  // switch, and the log is not the place to find out which.
+  const extra = Object.keys(profile.childEnv ?? {})
   return {
     env,
     diagnostic: `claude-code: routing to dsh provider "${provider}"`
       + `${profile.baseURL === undefined ? '' : ` at ${profile.baseURL}`}`
-      + ` (credential ${ref})`,
+      + ` (credential ${ref})`
+      + `${extra.length === 0 ? '' : `; route env ${extra.join(', ')}`}`,
   }
 }

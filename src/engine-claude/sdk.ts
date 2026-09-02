@@ -143,7 +143,8 @@ const BACKEND_ENV_GROUPS = [
 
 /**
  * Env keys forwarded regardless of backend: model routing, transport, and
- * chatter suppression. None of these select a backend, so no group owns them.
+ * chatter suppression. None of these select a backend, so no group owns them
+ * and no backend choice — inherited or derived — may drop them.
  *
  * The proxy trio survives scrubbedParentEnv() on its own (it matches no
  * sensitive pattern) and is listed for readability — one table describing
@@ -175,16 +176,36 @@ const SHARED_ENV_KEYS = [
  */
 function inheritedLlmCredentials(backend: ClaudeCodeBackend): Record<string, string> {
   const creds: Record<string, string> = {}
-  const take = (key: string): void => {
-    const value = process.env[key]
-    if (value !== undefined) creds[key] = value
-  }
   const chosen = backend === 'auto'
     ? BACKEND_ENV_GROUPS.find((group) => process.env[group.selector] !== undefined)
     : BACKEND_ENV_GROUPS.find((group) => group.id === backend)
-  for (const key of chosen?.keys ?? []) take(key)
-  for (const key of SHARED_ENV_KEYS) take(key)
+  for (const key of chosen?.keys ?? []) {
+    const value = process.env[key]
+    if (value !== undefined) creds[key] = value
+  }
   return creds
+}
+
+/**
+ * Re-inherit the entries that hold for every backend.
+ *
+ * Kept apart from {@link inheritedLlmCredentials} because the two are inherited
+ * for opposite reasons. Backend groups are mutually exclusive — the CLI resolves
+ * them by precedence rather than by merging, so forwarding two silently runs the
+ * child on the wrong one. Nothing here selects a backend: a proxy, a TLS
+ * setting, or a model alias is equally true whichever endpoint the child talks
+ * to. Folding them into the backend choice meant a derived route, which
+ * displaces that choice entirely, also lost its proxy and TLS settings.
+ *
+ * @returns env entries to lay over the scrubbed parent environment.
+ */
+function inheritedSharedEnv(): Record<string, string> {
+  const shared: Record<string, string> = {}
+  for (const key of SHARED_ENV_KEYS) {
+    const value = process.env[key]
+    if (value !== undefined) shared[key] = value
+  }
+  return shared
 }
 
 /**
@@ -197,11 +218,17 @@ function inheritedLlmCredentials(backend: ClaudeCodeBackend): Record<string, str
  * outrank a relay's `ANTHROPIC_BASE_URL` — leaving the CLI on the wrong
  * backend even though nothing re-inherited it.
  *
- * A derived `providerEnv` displaces inheritance entirely rather than merging
- * with it: dsh's own configuration is a better answer than whatever shell
- * launched the host, and a half-inherited second backend would out-rank it by
- * the CLI's own precedence rules. So when one is present, every backend key
- * outside it is removed and nothing is re-inherited.
+ * A derived `providerEnv` displaces *backend* inheritance entirely rather than
+ * merging with it: dsh's own configuration is a better answer than whatever
+ * shell launched the host, and a half-inherited second backend would out-rank it
+ * by the CLI's own precedence rules. So when one is present, every backend key
+ * outside it is removed and no backend is re-inherited.
+ *
+ * The shared entries are inherited either way. They select no backend, so the
+ * displacement that protects the route's endpoint has no reason to reach them —
+ * and a derived route needs a corporate proxy or a private CA's TLS setting at
+ * least as much as an inherited one does. The route's own entries sit above
+ * them, so a `childEnv` naming the same key wins.
  *
  * `ANTHROPIC_MODEL` sits below `spec.env` so a deployment that pins one in
  * config still beats the dsh selection, and above the inherited value so the
@@ -221,6 +248,7 @@ function claudeChildEnv(spec: ClaudeCodeQuerySpec): Record<string, string> {
   }
   return {
     ...env,
+    ...inheritedSharedEnv(),
     ...selected,
     ...spec.model === undefined ? {} : { ANTHROPIC_MODEL: spec.model },
     ...spec.env,
