@@ -467,7 +467,10 @@ export class ClaudeCodeAgent implements Agent {
           const stepEnd = await this.step()
           if (turnEnds === null) turnEnds = stepEnd
         } finally {
-          this.session.append('step/end', { turn, step })
+          // step() may have opened further steps for later SDK rounds; close
+          // whichever one is actually open (phase.step), not the one this
+          // iteration opened.
+          this.session.append('step/end', { turn, step: phase.step })
         }
         signal.throwIfAborted()
         if (turnEnds && this.inbox.nextStep.length === 0) {
@@ -650,7 +653,16 @@ export class ClaudeCodeAgent implements Agent {
     /* v8 ignore start -- private callers establish the running phase before executing a step */
     /* v8 ignore next -- private callers establish the running phase before executing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": step outside running phase`)    /* v8 ignore stop */
-    const { turn, step, abort: { signal } } = this.phase
+    const { turn, abort: { signal } } = this.phase
+    // One SDK query can contain several assistant↔tool rounds. Each round is
+    // mapped onto its OWN dsh step so the client trajectory (which groups nodes
+    // by `turn:step` and anchors the assistant node to that step's last
+    // assistant/message seq) interleaves each assistant message with the tool
+    // calls it issued, instead of piling every tool call above one collapsed
+    // assistant node. `step` is therefore mutable here, advanced by rollStep at
+    // each round boundary; turn() closes whichever step this leaves open.
+    let step = this.phase.step
+    const phase = this.phase
     signal.throwIfAborted()
 
     const cwd = this.session.header.cwd
@@ -717,12 +729,52 @@ export class ClaudeCodeAgent implements Agent {
       const reasoningByIndex = new Map<number, string>()
       /** Usage stashed from a suppressed reasoning-only message, used when the next message lacks its own. */
       let pendingUsage: TokenUsage | undefined
+      /**
+       * Whether the CURRENT dsh step has already appended a tool call. That is
+       * the only situation that mis-orders the trajectory: tool/call and
+       * tool/result events take seq numbers between the assistant message that
+       * issued them and the NEXT assistant message of the same step, so the
+       * client (which anchors the step's single assistant node to its last
+       * assistant/message seq) renders those tools above the node.
+       *
+       * So {@link rollStep} opens a fresh step at the next round boundary only
+       * when tools were issued — a plain sequence of text-only assistant
+       * messages (streamed partial + final, or two narration messages) stays in
+       * one step, matching the in-process loop.
+       *
+       * Keyed on the durable tool-call append, not the SDK's `message_start`
+       * stream event, because partial-message events are not emitted reliably
+       * for every round — the last tool round in particular would otherwise
+       * never roll, leaving its tool calls above the node.
+       */
+      let stepHasToolCall = false
+      /**
+       * Close the current dsh step and open the next one at a round boundary.
+       * turn() closes whichever step this leaves open (it reads `phase.step`).
+       */
+      const rollStep = (): void => {
+        this.session.append('step/end', { turn, step })
+        step += 1
+        phase.step = step
+        this.session.append('step/start', { turn, step })
+        stepHasToolCall = false
+        chunkSeqs.length = 0
+        toolCalls.clear()
+        reasoningByIndex.clear()
+      }
       signal.throwIfAborted()
       for await (const message of query) {
         signal.throwIfAborted()
         switch (message.type) {
           case 'stream_event': {
-            for (const chunk of mapStreamEvent(message.event, toolCalls)) {
+            const chunks = mapStreamEvent(message.event, toolCalls)
+            // A chunk arriving after this step already issued a tool call begins
+            // the next SDK round: roll BEFORE appending it, so the round's
+            // chunks and its assistant message land in the same new step. Keyed
+            // on real chunk output (not transport-only events) so a stray
+            // control event cannot open an empty step.
+            if (chunks.length > 0 && stepHasToolCall) rollStep()
+            for (const chunk of chunks) {
               chunkSeqs.push(this.session.append('assistant/chunk', { turn, step, chunk }).seq)
               if (chunk.type === 'reasoning-delta') {
                 reasoningByIndex.set(chunk.index, (reasoningByIndex.get(chunk.index) ?? '') + chunk.text)
@@ -732,6 +784,12 @@ export class ClaudeCodeAgent implements Agent {
           }
           case 'assistant': {
             const mapped = mapAssistantMessage(message.message)
+            // Fallback round boundary: a round that produced no stream chunks
+            // (non-streamed message) reaches here without the stream_event roll
+            // above having fired. Roll now, but only when the current step
+            // already issued a tool call — consecutive text-only messages stay
+            // in one step.
+            if (chunkSeqs.length === 0 && stepHasToolCall) rollStep()
             const isReasoningOnly = mapped.content.length > 0
               && mapped.content.every(block => block.type === 'reasoning')
             if (isReasoningOnly) {
@@ -783,6 +841,7 @@ export class ClaudeCodeAgent implements Agent {
               this.session.append('tool/call', {
                 turn, step, callId: call.callId, name: call.name, arguments: call.arguments,
               })
+              stepHasToolCall = true
             }
             break
           }

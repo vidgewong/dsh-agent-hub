@@ -526,6 +526,119 @@ describe('ClaudeCodeAgent turn mapping', () => {
     }
   })
 
+  it('splits multi-round SDK queries into one dsh step per assistant round so the trajectory interleaves', async () => {
+    const ctx = await harness()
+    try {
+      const toolUse = (id: string, name: string): SDKMessage => ({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        uuid: `u-${id}`,
+        session_id: 's-multi',
+        message: {
+          id: `msg-${id}`,
+          container: null,
+          context_management: null,
+          role: 'assistant',
+          type: 'message',
+          content: [{ type: 'tool_use', id, name, input: { file_path: `${id}.txt` } }],
+          stop_reason: 'tool_use',
+          stop_sequence: null,
+          stop_details: null,
+          model: 'claude-sonnet-4-5',
+          usage: {
+            cache_creation: null,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            inference_geo: null,
+            input_tokens: 9,
+            iterations: null,
+            output_tokens: 4,
+            server_tool_use: null,
+          },
+        },
+      } as unknown as SDKMessage)
+      const toolResult = (id: string): SDKMessage => ({
+        type: 'user',
+        parent_tool_use_id: id,
+        uuid: `ur-${id}`,
+        session_id: 's-multi',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: id, content: `body-${id}`, is_error: false }],
+        },
+      } as unknown as SDKMessage)
+
+      // Two SDK rounds inside ONE query with NO `message_start` events at all —
+      // the real streams do not reliably emit them, and the last round in
+      // particular must still get its own dsh step. assistant#1 issues tool A,
+      // its result returns, assistant#2 issues tool B, its result returns, then
+      // a final text message. The one-assistant-per-step invariant rolls the
+      // step at each assistant append.
+      queryMock.mockImplementation(() => stream([
+        toolUse('toolA', 'Read'),
+        toolResult('toolA'),
+        toolUse('toolB', 'Read'),
+        toolResult('toolB'),
+        assistantText('all done'),
+        successResult(),
+      ]))
+
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('multi-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'do both' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const events = agent.session.events
+      // The step-coordinate each durable node carries must place every tool
+      // call/result in the SAME step as the assistant message that issued it,
+      // and each round in an increasing step number.
+      const stepOf = (callId: string): number => {
+        const ev = events.find(e => e.type === 'tool/call' && (e.data as { callId: string }).callId === callId)!
+        return (ev.data as { step: number }).step
+      }
+      const stepA = stepOf('toolA')
+      const stepB = stepOf('toolB')
+      expect(stepB).toBeGreaterThan(stepA)
+
+      // The tool RESULT of each round shares its call's step (result is grouped
+      // with the assistant that issued the call, not hoisted to the top).
+      const resultStepOf = (callId: string): number => {
+        const ev = events.find(e => e.type === 'tool/result'
+          && (e.data as { message: { source: { callId: string } } }).message.source.callId === callId)!
+        return (ev.data as { step: number }).step
+      }
+      expect(resultStepOf('toolA')).toBe(stepA)
+      expect(resultStepOf('toolB')).toBe(stepB)
+
+      // Each assistant/message must precede (lower seq than) the tool events of
+      // its own round — the ordering the client trajectory renders by.
+      const assistantSeqs = events
+        .filter(e => e.type === 'assistant/message')
+        .map(e => e.seq)
+      const callASeq = events.find(e => e.type === 'tool/call' && (e.data as { callId: string }).callId === 'toolA')!.seq
+      const callBSeq = events.find(e => e.type === 'tool/call' && (e.data as { callId: string }).callId === 'toolB')!.seq
+      // assistant#1 (tool A round) comes before call A; assistant#2 before call B.
+      expect(assistantSeqs[0]).toBeLessThan(callASeq)
+      expect(assistantSeqs[1]).toBeLessThan(callBSeq)
+      expect(assistantSeqs[1]).toBeGreaterThan(callASeq)
+
+      // The final text message lands in a step AFTER the last tool round, so it
+      // renders below tool B rather than the tools piling above it.
+      const finalStep = events.find(e => e.type === 'assistant/message'
+        && (e.data as { message: { content: { type: string }[] } }).message.content.some(b => b.type === 'text'))!
+      expect((finalStep.data as { step: number }).step).toBeGreaterThan(stepB)
+
+      // Steps are well-formed: every step/start has a matching step/end.
+      const starts = events.filter(e => e.type === 'step/start').length
+      const ends = events.filter(e => e.type === 'step/end').length
+      expect(starts).toBe(ends)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('ends the turn with an error when the SDK reports an execution failure', async () => {
     const ctx = await harness()
     try {
