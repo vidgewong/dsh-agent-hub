@@ -227,7 +227,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       expect(params).toBeDefined()
       expect(params!.prompt).toContain('<user>')
       expect(params!.prompt).toContain('hi')
-      expect(params!.options.persistSession).toBe(false)
+      expect(params!.options.persistSession).toBe(true)
       expect(params!.options.permissionMode).toBe('dontAsk')
       expect(params!.options.disallowedTools).toContain('AskUserQuestion')
     } finally {
@@ -634,6 +634,252 @@ describe('ClaudeCodeAgent turn mapping', () => {
       const starts = events.filter(e => e.type === 'step/start').length
       const ends = events.filter(e => e.type === 'step/end').length
       expect(starts).toBe(ends)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('coalesces one API turn split across SDK fragments into a single assistant message above its tool calls', async () => {
+    const ctx = await harness()
+    try {
+      // The CLI splits ONE model turn across several `assistant` messages that
+      // share `message.id`: narration text first, then the tool_use. Appended
+      // separately, the tool-only fragment used to erase the narration under
+      // the client's last-wins projection and leave the step with no visible
+      // assistant node at all.
+      const fragment = (content: unknown[], id = 'msg-split'): SDKMessage => ({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        uuid: `u-${String(content.length)}-${id}`,
+        session_id: 's-split',
+        message: {
+          id,
+          container: null,
+          context_management: null,
+          role: 'assistant',
+          type: 'message',
+          content,
+          stop_reason: 'tool_use',
+          stop_sequence: null,
+          stop_details: null,
+          model: 'claude-sonnet-4-5',
+          usage: {
+            cache_creation: null,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            inference_geo: null,
+            input_tokens: 9,
+            iterations: null,
+            output_tokens: 4,
+            server_tool_use: null,
+          },
+        },
+      } as unknown as SDKMessage)
+
+      queryMock.mockImplementation(() => stream([
+        fragment([{ type: 'text', text: 'I will read the file.' }]),
+        fragment([{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'a.txt' } }]),
+        {
+          type: 'user',
+          parent_tool_use_id: 'toolu_1',
+          uuid: 'ur-1',
+          session_id: 's-split',
+          message: {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'body', is_error: false }],
+          },
+        } as unknown as SDKMessage,
+        fragment([{ type: 'text', text: 'Done.' }], 'msg-second'),
+        successResult(),
+      ]))
+
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('coalesce-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'read it' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const events = agent.session.events
+      const assistants = events.filter(e => e.type === 'assistant/message')
+      // Two API turns → exactly two assistant messages, no tool-only fragment.
+      expect(assistants).toHaveLength(2)
+      // The first carries BOTH the narration and the tool-call block: the
+      // narration is no longer erased.
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'text', text: 'I will read the file.' },
+        { type: 'tool-call', id: 'toolu_1', name: 'Read', arguments: '{"file_path":"a.txt"}' },
+      ])
+      expect(assistants[1]?.data.message.content).toEqual([{ type: 'text', text: 'Done.' }])
+
+      // The assistant message precedes its tool call, so the client anchors the
+      // assistant node ABOVE the tool node instead of piling tools on top.
+      const callSeq = events.find(e => e.type === 'tool/call')!.seq
+      expect(assistants[0]!.seq).toBeLessThan(callSeq)
+      // The second API turn opened a new step, below the tool round.
+      const stepOfFirst = (assistants[0]!.data as { step: number }).step
+      const stepOfSecond = (assistants[1]!.data as { step: number }).step
+      expect(stepOfSecond).toBeGreaterThan(stepOfFirst)
+      // Each step holds at most one assistant message — the invariant the
+      // client's last-wins projection depends on.
+      const perStep = new Map<number, number>()
+      for (const event of assistants) {
+        const s = (event.data as { step: number }).step
+        perStep.set(s, (perStep.get(s) ?? 0) + 1)
+      }
+      expect([...perStep.values()].every(count => count === 1)).toBe(true)
+      expect(events.filter(e => e.type === 'step/start').length)
+        .toBe(events.filter(e => e.type === 'step/end').length)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('rebases streamed block indices per fragment so a tool block cannot overwrite streamed text', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        // Fragment 1 streams text at raw index 0.
+        streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '', citations: null } }),
+        streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'narration' } }),
+        streamEvent({ type: 'content_block_stop', index: 0 }),
+        // Fragment 2 RESTARTS at raw index 0 with a tool block. Without a
+        // rebase this overwrites blocks[0] and the narration vanishes live.
+        streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_x', name: 'Read', input: {} } }),
+        streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{}' } }),
+        successResult(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('rebase-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const chunks = agent.session.events
+        .filter((e): e is Extract<typeof e, { type: 'assistant/chunk' }> => e.type === 'assistant/chunk')
+        .map(e => e.data.chunk)
+      expect(chunks).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'narration' },
+        { type: 'block-start', index: 1, blockType: 'tool-call' },
+        { type: 'tool-call-delta', index: 1, id: 'toolu_x', name: 'Read', argumentsDelta: '{}' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('drops subagent frames and orphan nested tool results from the top-level transcript', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        {
+          type: 'assistant',
+          parent_tool_use_id: null,
+          uuid: 'u-task',
+          session_id: 's-sub',
+          message: {
+            id: 'msg-task',
+            container: null,
+            context_management: null,
+            role: 'assistant',
+            type: 'message',
+            content: [{ type: 'tool_use', id: 'toolu_task', name: 'Task', input: { prompt: 'go' } }],
+            stop_reason: 'tool_use',
+            stop_sequence: null,
+            stop_details: null,
+            model: 'claude-sonnet-4-5',
+            usage: {
+              cache_creation: null,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+              inference_geo: null,
+              input_tokens: 9,
+              iterations: null,
+              output_tokens: 4,
+              server_tool_use: null,
+            },
+          },
+        } as unknown as SDKMessage,
+        // Child transcript: assistant narration and a nested tool call/result
+        // that belong to the subagent, not to this session's step.
+        {
+          type: 'assistant',
+          parent_tool_use_id: 'toolu_task',
+          uuid: 'u-child',
+          session_id: 's-sub',
+          message: {
+            id: 'msg-child',
+            container: null,
+            context_management: null,
+            role: 'assistant',
+            type: 'message',
+            content: [
+              { type: 'text', text: 'child narration' },
+              { type: 'tool_use', id: 'toolu_child', name: 'Read', input: {} },
+            ],
+            stop_reason: 'tool_use',
+            stop_sequence: null,
+            stop_details: null,
+            model: 'claude-sonnet-4-5',
+            usage: {
+              cache_creation: null,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+              inference_geo: null,
+              input_tokens: 1,
+              iterations: null,
+              output_tokens: 1,
+              server_tool_use: null,
+            },
+          },
+        } as unknown as SDKMessage,
+        {
+          type: 'user',
+          parent_tool_use_id: 'toolu_task',
+          uuid: 'ur-child',
+          session_id: 's-sub',
+          message: {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: 'toolu_child', content: 'child body', is_error: false }],
+          },
+        } as unknown as SDKMessage,
+        // The parent's own Task result.
+        {
+          type: 'user',
+          parent_tool_use_id: null,
+          uuid: 'ur-task',
+          session_id: 's-sub',
+          message: {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: 'toolu_task', content: 'report', is_error: false }],
+          },
+        } as unknown as SDKMessage,
+        successResult(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('subagent-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'delegate' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const events = agent.session.events
+      // Only the top-level Task call and its result are transcribed.
+      expect(events.filter(e => e.type === 'tool/call').map(e => (e.data as { callId: string }).callId))
+        .toEqual(['toolu_task'])
+      expect(events
+        .filter(e => e.type === 'tool/result')
+        .map(e => String((e.data as { message: { source: { callId: string } } }).message.source.callId)))
+        .toEqual(['toolu_task'])
+      // The child's narration never entered the parent transcript.
+      const texts = events
+        .filter(e => e.type === 'assistant/message')
+        .flatMap(e => (e.data as { message: { content: { type: string; text?: string }[] } }).message.content)
+        .filter(block => block.type === 'text')
+        .map(block => block.text)
+      expect(texts).not.toContain('child narration')
     } finally {
       await ctx.fiber.dispose()
     }

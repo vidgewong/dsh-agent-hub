@@ -192,6 +192,49 @@ export interface StreamToolCall {
   readonly name: string
 }
 
+/** A chunk's block index, or undefined for chunks carrying no block coordinate. */
+function chunkIndex(chunk: StreamChunk): number | undefined {
+  return 'index' in chunk ? chunk.index : undefined
+}
+
+/**
+ * Shift every block coordinate in one chunk batch by a fixed offset.
+ *
+ * The dsh client addresses a step's live assistant blocks by
+ * `blocks[chunk.index]`, so two streamed blocks that share an index inside one
+ * step overwrite each other. The Claude CLI restarts `content_block` indices
+ * whenever it splits one API turn across several SDK assistant messages, which
+ * makes a `tool_use` block at index 0 silently erase the narration text that
+ * streamed at index 0 moments earlier. Rebasing per message keeps every block
+ * of a dsh step at a distinct index.
+ * @param chunks - chunks as produced by {@link mapStreamEvent}.
+ * @param offset - non-negative amount added to each block coordinate.
+ * @returns rebased copies, or the same chunk objects when the offset is zero.
+ */
+export function rebaseChunkIndices(chunks: readonly StreamChunk[], offset: number): StreamChunk[] {
+  if (offset === 0) return [...chunks]
+  return chunks.map((chunk) => {
+    const index = chunkIndex(chunk)
+    return index === undefined ? chunk : { ...chunk, index: index + offset }
+  })
+}
+
+/**
+ * Highest block coordinate present in one chunk batch, or undefined when the
+ * batch carries no block coordinates at all.
+ * @param chunks - already-rebased chunks.
+ * @returns the maximum index, or undefined.
+ */
+export function maxChunkIndex(chunks: readonly StreamChunk[]): number | undefined {
+  let max: number | undefined
+  for (const chunk of chunks) {
+    const index = chunkIndex(chunk)
+    if (index === undefined) continue
+    if (max === undefined || index > max) max = index
+  }
+  return max
+}
+
 /**
  * Translate one SDK raw stream event into the dsh assistant chunks that drive
  * the live partial projection. Text blocks yield `block-start`/`text-delta`;

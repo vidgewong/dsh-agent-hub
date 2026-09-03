@@ -85,7 +85,9 @@ describe('claudeQueryOptions', () => {
   it('defaults to the lock-down permission mode with disallowed interactive tools', () => {
     const options = claudeQueryOptions(spec(), new AbortController())
     expect(options.permissionMode).toBe('dontAsk')
-    expect(options.persistSession).toBe(false)
+    // The CLI keeps its own transcript so `claude --resume` works against the
+    // same child session; dsh's durable log remains the model-context source.
+    expect(options.persistSession).toBe(true)
     expect(options.includePartialMessages).toBe(true)
     expect(options.disallowedTools).toEqual(['AskUserQuestion'])
     expect(options.abortController).toBeInstanceOf(AbortController)
@@ -143,10 +145,14 @@ describe('claudeQueryOptions', () => {
     expect(elicitation).toEqual({ action: 'decline' })
     const dialog = await options.onUserDialog!({} as never, { signal: new AbortController().signal })
     expect(dialog).toEqual({ behavior: 'cancelled' })
-    expect(reports).toHaveLength(3)
-    expect(reports[0]).toContain('mode dontAsk')
-    expect(reports[1]).toContain('MCP elicitation')
-    expect(reports[2]).toContain('user dialog')
+    // reports[0] is the construction-time routing diagnostic: this spec
+    // configures no backend selector, so `backendDiagnostic` reports the
+    // fallback to the CLI's own login state before any interaction runs.
+    expect(reports).toHaveLength(4)
+    expect(reports[0]).toContain('no provider backend configured')
+    expect(reports[1]).toContain('mode dontAsk')
+    expect(reports[2]).toContain('MCP elicitation')
+    expect(reports[3]).toContain('user dialog')
   })
 
   it('spawns the Claude Code process through the shared process owner', () => {

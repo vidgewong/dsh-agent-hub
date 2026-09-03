@@ -11,6 +11,8 @@ import {
   mapAssistantMessage,
   mapStreamEvent,
   mapToolResults,
+  maxChunkIndex,
+  rebaseChunkIndices,
   stringifyToolInput,
   type StreamToolCall,
 } from '../../src/engine-claude/mapping.ts'
@@ -484,5 +486,30 @@ describe('serializeHistory', () => {
       { role: 'user' as const, id: MessageId('m-go-2'), content: [{ type: 'text' as const, text: 'go' }], source: { kind: 'user' as const } },
     ])
     expect(prompt).toBe('<user>\ngo\n</user>')
+  })
+})
+
+describe('rebaseChunkIndices / maxChunkIndex', () => {
+  const chunks = [
+    { type: 'block-start' as const, index: 0, blockType: 'text' as const },
+    { type: 'text-delta' as const, index: 0, text: 'hi' },
+    { type: 'block-start' as const, index: 2, blockType: 'tool-call' as const },
+  ]
+
+  it('returns a copy unchanged at offset zero', () => {
+    expect(rebaseChunkIndices(chunks, 0)).toEqual(chunks)
+  })
+
+  it('shifts every block coordinate by the offset', () => {
+    expect(rebaseChunkIndices(chunks, 3)).toEqual([
+      { type: 'block-start', index: 3, blockType: 'text' },
+      { type: 'text-delta', index: 3, text: 'hi' },
+      { type: 'block-start', index: 5, blockType: 'tool-call' },
+    ])
+  })
+
+  it('reports the highest coordinate, or undefined for an empty batch', () => {
+    expect(maxChunkIndex(chunks)).toBe(2)
+    expect(maxChunkIndex([])).toBeUndefined()
   })
 })
