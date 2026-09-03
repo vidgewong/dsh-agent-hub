@@ -39,8 +39,11 @@ export declare const name = "loop-engine";
  *
  * The optional host services (`commands`, `skills`) stay out: they are resolved
  * lazily via `ctx.get` and may legitimately be absent from a minimal profile.
- * The hosted engine factories declare their own `inject` when mounted as
- * children.
+ * The hosted engine factories (Claude Code, Codex, Pi) declare their own
+ * `inject` when mounted as children; the base in-process loop additionally
+ * requires `llm` and `tools`, which are injected through a dedicated
+ * `ctx.inject` scope in {@link apply} rather than here — listing them here
+ * would block the three external engines on services they never touch.
  */
 export declare const inject: string[];
 /** Composition entry for the loop engine selection and the hosted engine drivers. */
@@ -105,6 +108,13 @@ export declare function syncManagedBlock(path: string): Promise<boolean>;
  * The import is dynamic and failure-tolerant: the package is a peer, and a
  * deployment that omits it should lose only the in-process engine rather than
  * failing the whole plugin tree.
+ *
+ * **Caller requirement**: the base loop declares `static inject = ['agents',
+ * 'sessions', 'llm', 'tools', 'systemPrompt']`. The `loopCtx` must descend
+ * from a context whose fiber chain carries `llm` and `tools` in its inject,
+ * otherwise the Cordis property walk will throw `cannot get property "tools"
+ * without inject` at runtime. {@link apply} satisfies this by wrapping the
+ * call in a `ctx.inject(['llm', 'tools'], ...)` scope.
  *
  * @param ctx - the plugin context, used for diagnostics.
  * @param loopCtx - the shadowed context that redirects `setFactory` to the router.

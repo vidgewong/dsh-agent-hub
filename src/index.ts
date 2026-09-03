@@ -64,8 +64,11 @@ export const name = 'loop-engine'
  *
  * The optional host services (`commands`, `skills`) stay out: they are resolved
  * lazily via `ctx.get` and may legitimately be absent from a minimal profile.
- * The hosted engine factories declare their own `inject` when mounted as
- * children.
+ * The hosted engine factories (Claude Code, Codex, Pi) declare their own
+ * `inject` when mounted as children; the base in-process loop additionally
+ * requires `llm` and `tools`, which are injected through a dedicated
+ * `ctx.inject` scope in {@link apply} rather than here — listing them here
+ * would block the three external engines on services they never touch.
  */
 export const inject = ['agents', 'systemPrompt']
 
@@ -233,6 +236,13 @@ function piConfig(config: Config): PiConfig {
  * The import is dynamic and failure-tolerant: the package is a peer, and a
  * deployment that omits it should lose only the in-process engine rather than
  * failing the whole plugin tree.
+ *
+ * **Caller requirement**: the base loop declares `static inject = ['agents',
+ * 'sessions', 'llm', 'tools', 'systemPrompt']`. The `loopCtx` must descend
+ * from a context whose fiber chain carries `llm` and `tools` in its inject,
+ * otherwise the Cordis property walk will throw `cannot get property "tools"
+ * without inject` at runtime. {@link apply} satisfies this by wrapping the
+ * call in a `ctx.inject(['llm', 'tools'], ...)` scope.
  *
  * @param ctx - the plugin context, used for diagnostics.
  * @param loopCtx - the shadowed context that redirects `setFactory` to the router.
@@ -416,7 +426,40 @@ export function apply(ctx: Context, config: Config): void {
   mount('claude-code', () => engineCtx('claude-code').plugin(ClaudeCodeLoop, claudeCodeConfig(config)))
   mount('codex', () => engineCtx('codex').plugin(CodexLoop, codexConfig(config)))
   mount('pi', () => engineCtx('pi').plugin(PiLoop, piConfig(config)))
-  mountBaseLoop(ctx, engineCtx('in-process'), mount)
+
+  // The base in-process loop declares `static inject = ['agents', 'sessions',
+  // 'llm', 'tools', 'systemPrompt']` — it needs the host's `tools` and `llm`
+  // services to schedule tool calls and stream model responses. The hosted
+  // engines (Claude Code, Codex, Pi) delegate both to their CLI child processes
+  // and never touch `ctx.tools` or `ctx.llm`, which is why they mount directly.
+  //
+  // This plugin's own inject is `['agents', 'systemPrompt']`, so its fiber
+  // does not carry `tools` or `llm` in its inject chain. Without an explicit
+  // scope, the base loop's child fiber walks up through parent fibers that
+  // never declared those services, and the Cordis property resolution throws
+  // `cannot get property "tools" without inject` when the walk terminates at
+  // the root fiber. The base loop's own `_checkImpl` can still find the
+  // implementations in the global reflect store (and activate the fiber), but
+  // the *runtime* Proxy handler's fiber walk is stricter — it requires each
+  // step's parent to either hold the service in its store or declare it in its
+  // inject before continuing the walk.
+  //
+  // `ctx.inject(['llm', 'tools'], ...)` closes the gap: it starts a child
+  // fiber that declares both names, waits for their providers, and gives the
+  // base loop a parent whose fiber walk succeeds. If either provider
+  // disappears the scope tears down and the in-process engine unmounts cleanly
+  // — the other three engines are never touched.
+  ctx.inject(['llm', 'tools'], (injectedCtx: Context) => {
+    const inProcessCtx = injectedCtx.extend({
+      agents: router.shadowFor('in-process', ctx.agents),
+      systemPrompt: shadowSystemPrompt(ctx.systemPrompt, (variable) => {
+        if (claimedVariables.has(variable)) return false
+        claimedVariables.add(variable)
+        return true
+      }),
+    })
+    mountBaseLoop(ctx, inProcessCtx, mount)
+  })
 
   // Claude Code slash commands are a client-side namespace, not a scoped
   // registry, so they cannot be filtered by the per-agent seam above. They stay
