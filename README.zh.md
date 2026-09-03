@@ -57,17 +57,31 @@ dsh plugin --profile web add @vidge/dsh-agent-hub
 
 ### 引擎依赖
 
-各引擎的 SDK 都是**可选 peer 依赖**——安装本插件只会装入路由器本身。按需添加你
-真正要用的引擎：
+各引擎的 SDK 都是**可选 peer 依赖**——安装本插件只会装入路由器本身。按需把你真正
+要用的引擎装进**同一个 profile**：
 
 ```sh
 # Claude Code
-pnpm add @anthropic-ai/claude-agent-sdk
+dsh plugin --profile web add @anthropic-ai/claude-agent-sdk@0.3.220
 # Codex
-pnpm add @openai/codex
+dsh plugin --profile web add @openai/codex@0.149.1
 # Pi
-pnpm add @earendil-works/pi-coding-agent
+dsh plugin --profile web add @earendil-works/pi-coding-agent@0.84.3
 ```
+
+有两点必须照做，任意一点做错，看起来都会像是插件的 bug：
+
+- **用 `dsh plugin ... add`，不要用裸的 `pnpm add`。** SDK 必须落在真正运行 dsh 的
+  那个 profile 里（`~/.dsh/profiles/<名称>`）。在别的目录 `pnpm add` 装出来的包，
+  宿主永远解析不到。
+- **锁定本版本声明的版本号。** 上面的版本就是本包 `peerDependencies` 中的精确条目；
+  这些 SDK 的消息词汇表在小版本间并不稳定，版本漂移不属于受支持的配置。
+
+由于 profile 设置了 `autoInstallPeers: false`，可选 peer 只有在被某个包显式依赖时
+才会存在。按上面的命令把它装成 profile 的直接依赖，会将其记入该 profile 的 lockfile，
+后续的安装与升级都会保留它。反之，只是碰巧躺在 `node_modules` 里、却没有任何依赖指向
+它的 SDK 是一个孤儿包，该 profile 下一次 `pnpm install` 就会把它剪掉——此后引擎便会
+报告该包缺失。
 
 `in-process` 引擎除 dsh 本身外无任何额外要求，因此一个 SDK 都不装的 profile 仍可
 正常工作。

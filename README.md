@@ -67,16 +67,34 @@ runtime state — switching never requires a restart again.
 ### Engine dependencies
 
 Each engine's SDK is an **optional peer** — installing this plugin pulls in the
-router only. Add the engines you actually want:
+router only. Add the engines you actually want, into **the same profile**:
 
 ```sh
 # Claude Code
-pnpm add @anthropic-ai/claude-agent-sdk
+dsh plugin --profile web add @anthropic-ai/claude-agent-sdk@0.3.220
 # Codex
-pnpm add @openai/codex
+dsh plugin --profile web add @openai/codex@0.149.1
 # Pi
-pnpm add @earendil-works/pi-coding-agent
+dsh plugin --profile web add @earendil-works/pi-coding-agent@0.84.3
 ```
+
+Two details matter, and getting either wrong looks like a plugin bug:
+
+- **Install through `dsh plugin ... add`, not a bare `pnpm add`.** The SDK has to
+  land in the profile that runs dsh (`~/.dsh/profiles/<name>`). A `pnpm add` in
+  some other directory installs a package the host will never resolve.
+- **Pin the version this release declares.** The versions above are the exact
+  `peerDependencies` entries of this package; the SDK message vocabularies are
+  not stable across minors, and a drifting version is not a supported
+  configuration.
+
+Because profiles set `autoInstallPeers: false`, an optional peer is only ever
+present if some package explicitly depends on it. Installing it as a direct
+profile dependency (which the command above does) records it in the profile's
+lockfile, so later installs and upgrades keep it. An SDK that is merely *present*
+in `node_modules` without being depended on is an orphan, and the next
+`pnpm install` in that profile will prune it — after which the engine reports the
+package as missing.
 
 The `in-process` engine needs nothing beyond dsh itself, so a profile that
 installs no SDK at all still works.

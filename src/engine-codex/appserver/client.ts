@@ -21,6 +21,7 @@ import type {
   TurnStartParams,
   TurnStartResult,
 } from './types.ts'
+import { CODEX_SDK, missingSdkError } from '../../driver-core/missing-sdk.ts'
 
 /** Callback for receiving server notifications. */
 export type NotificationHandler = (method: string, params: unknown) => void
@@ -39,10 +40,7 @@ function codexCliEntrypoint(): string {
   try {
     return join(dirname(require.resolve('@openai/codex/package.json')), 'bin', 'codex.js')
   } catch (error: unknown) {
-    throw new Error(
-      'the Codex engine requires "@openai/codex", which is not installed. Add it to '
-      + `this profile, or pick another engine for this session. (${String(error)})`,
-    )
+    throw missingSdkError(CODEX_SDK, error)
   }
 }
 

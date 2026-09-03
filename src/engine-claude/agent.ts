@@ -36,6 +36,7 @@ import {
   type StreamToolCall,
 } from './mapping.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
+import { CLAUDE_CODE_SDK, missingSdkError } from '../driver-core/missing-sdk.ts'
 import { approvalReason, resolveSessionPermission } from './permission.ts'
 import { DEFAULT_PERMISSION_MODE, claudeQueryOptions, type ClaudeCodeQuerySpec } from './sdk.ts'
 import { deriveProviderEnv } from './provider-env.ts'
@@ -82,11 +83,7 @@ async function loadClaudeQuery(): Promise<OfficialQuery> {
       // Clear the slot so a later step retries rather than replaying a failure
       // the user may have fixed by installing the package in the meantime.
       claudeQueryPromise = undefined
-      throw new Error(
-        'the Claude Code engine requires "@anthropic-ai/claude-agent-sdk", which is not '
-        + 'installed. Add it to this profile, or pick another engine for this session. '
-        + `(${String(error)})`,
-      )
+      throw missingSdkError(CLAUDE_CODE_SDK, error)
     },
   )
   return claudeQueryPromise

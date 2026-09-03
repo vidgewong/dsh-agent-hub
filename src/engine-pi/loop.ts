@@ -35,6 +35,7 @@ import { PiAgent } from './agent.ts'
 import type { PiProcess, PiSpawnSpec } from './rpc/client.ts'
 import type { PiSandboxMode, ResolvedConfig } from './types.ts'
 import { FactoryOwnership, raceAbort, raceAbortCall } from '../driver-core/ownership.ts'
+import { PI_SDK, missingSdkError } from '../driver-core/missing-sdk.ts'
 
 /** Pi CLI sandbox modes a deployment may pin. */
 export const PI_SANDBOX_MODES: readonly PiSandboxMode[] = [
@@ -110,10 +111,7 @@ function piCliEntrypoint(): string {
     mainUrl = (import.meta as ImportMeta & { resolve: (specifier: string) => string })
       .resolve('@earendil-works/pi-coding-agent')
   } catch (error: unknown) {
-    throw new Error(
-      'the Pi engine requires "@earendil-works/pi-coding-agent", which is not installed. '
-      + `Add it to this profile, or pick another engine for this session. (${String(error)})`,
-    )
+    throw missingSdkError(PI_SDK, error)
   }
   const root = dirname(dirname(fileURLToPath(mainUrl)))
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { bin?: string | Record<string, string> }
