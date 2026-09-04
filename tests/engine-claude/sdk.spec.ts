@@ -89,6 +89,7 @@ describe('claudeQueryOptions', () => {
     // same child session; dsh's durable log remains the model-context source.
     expect(options.persistSession).toBe(true)
     expect(options.includePartialMessages).toBe(true)
+    expect(options.forwardSubagentText).toBe(true)
     expect(options.disallowedTools).toEqual(['AskUserQuestion'])
     expect(options.abortController).toBeInstanceOf(AbortController)
     expect(options.cwd).toBe(process.cwd())

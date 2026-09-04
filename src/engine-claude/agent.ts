@@ -22,9 +22,10 @@ import type { ContentBlock, LlmCallConfig, Message, TokenUsage } from '@deepseek
 import { LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
-import { canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
+import type { Session, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import { SessionId, canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
+import { randomUUID } from 'node:crypto'
 import type { SDKResultError } from '@anthropic-ai/claude-agent-sdk'
 import type { ResolvedConfig } from './types.ts'
 import {
@@ -155,6 +156,286 @@ function failureCode(subtype: SDKResultError['subtype']): string {
       return `CLAUDE_CODE_${subtype.toUpperCase()}`
     default:
       return 'CLAUDE_CODE_ERROR'
+  }
+}
+
+/**
+ * Descriptor version stamped into every `subagent/descriptor` event. Matches
+ * `@deepseek-ai/dsh-subagent/descriptor.SUBAGENT_DESCRIPTOR_VERSION` so the
+ * native projection unit classifies these child sessions correctly.
+ */
+const SUBAGENT_DESCRIPTOR_VERSION = 2
+
+/** Minimal session store shape (avoiding a peer dep on SessionStore). */
+interface SessionStoreLike {
+  prepare(id?: SessionId, options?: {
+    meta?: {
+      cwd?: string
+      parentSession?: SessionId
+      origin?: 'subagent'
+      delegationDepth?: number
+    }
+  }): Session
+  enter(session: Session): () => void
+  announce(session: Session): void
+}
+
+/** Minimal agent registry shape used to publish subagent activity. */
+interface AgentRegistryLike {
+  enter(agent: Agent, owner: Agent | undefined): () => void
+  announce(agent: Agent): void
+}
+
+/**
+ * One SDK-driven subagent transcript materialised as a dsh child session. The
+ * child session has `origin: 'subagent'` in its header and a
+ * `subagent/descriptor` event, so `dsh-client-ui-subagent` discovers it through
+ * the lineage breadcrumbs and can render its own trajectory in the right panel.
+ *
+ * Each instance maps one `parent_tool_use_id` to one child session. The parent
+ * session sees only the Task tool call and its final result; the child session
+ * stores the full subagent transcript (streaming chunks, assistant messages,
+ * tool calls, and tool results).
+ *
+ * It is also a live {@link Agent} in the registry. The Host derives each
+ * catalog row's `activity` from `ctx.agents.get(id)?.status`, so a child that
+ * exists only as a Session always reads as inactive and the lineage renders a
+ * settled green dot while the subagent is still working. Registering the child
+ * makes `agent/status` transitions real, which is what drives the running
+ * animation. The SDK owns the child's turn, so this agent is transcript-only:
+ * it reports status and refuses input rather than driving a loop.
+ */
+class SubagentChildSession implements Agent {
+  readonly session: Session
+  readonly id: SessionId
+  readonly options: AgentOptions
+  readonly inbox: Inbox
+  readonly scope: Scope
+  readonly ctx: Context
+  /** Detach the child session from the live store so it shows as inactive. */
+  private readonly detach: () => void
+  /** Remove the child agent from the registry once the subagent settles. */
+  private detachAgent: (() => void) | undefined
+  /** Fused dispatcher for this child's `agent/status` transitions. */
+  private readonly dispatch: AgentEventDispatch
+  /** Live status; `running` from creation until the subagent settles. */
+  private currentStatus: AgentStatus = 'idle'
+  /** dsh turn counter inside the child session. */
+  turn = 0
+  /** dsh step counter inside the current turn. */
+  step = 0
+  /** Whether the child's current step has already published its assistant/message. */
+  stepFlushed = false
+  /** Coalesced content blocks of the child's current API turn. */
+  pendingContent: ContentBlock[] = []
+  /** Latest usage for the pending API turn. */
+  pendingUsage: TokenUsage | undefined
+  /** Model id from the pending turn. */
+  pendingModel: string | undefined
+  /** `message.id` of the accumulating child API turn. */
+  pendingMessageId: string | undefined
+  /** Per-block-index tool identity for child stream events. */
+  toolCalls = new Map<number, StreamToolCall>()
+  /** Accumulated reasoning per rebased block index. */
+  reasoningByIndex = new Map<number, string>()
+  /** Chunk seqs for source linking. */
+  chunkSeqs: number[] = []
+  /** Call ids published by the child, for result pairing. */
+  ownCallIds = new Set<string>()
+  /** Block-index rebase state. */
+  blockOffset = 0
+  maxSeenIndex = -1
+  lastRawStart: number | undefined
+  /** Whether the Task prompt has been seeded as the child's first user message. */
+  private seeded = false
+
+  constructor(
+    loopCtx: Context,
+    parentAgent: Agent,
+    sessions: SessionStoreLike,
+    agents: AgentRegistryLike | undefined,
+    label: string | undefined,
+    provider: string,
+    /** Initial prompt text from the Task tool arguments. */
+    prompt: string | undefined,
+  ) {
+    const parentHeader = parentAgent.session.header
+    const childId = SessionId(randomUUID())
+    this.id = childId
+    this.options = parentAgent.options
+    this.session = sessions.prepare(childId, {
+      meta: {
+        ...parentHeader.cwd === undefined ? {} : { cwd: parentHeader.cwd },
+        parentSession: parentHeader.id,
+        origin: 'subagent',
+        delegationDepth: (parentHeader.delegationDepth ?? 0) + 1,
+      },
+    })
+    this.dispatch = agentEvents(loopCtx, this)
+    this.inbox = new Inbox(this.session, {
+      inserted: () => undefined,
+      discarded: () => undefined,
+      claimed: () => undefined,
+    })
+    this.scope = createScope(loopCtx, this)
+    this.ctx = this.scope.ctx.extend({ agent: this })
+    this.detach = sessions.enter(this.session)
+    // Append the descriptor so the projection unit classifies the child.
+    // The type name is augmented by @deepseek-ai/dsh-subagent (an optional
+    // peer); the cast avoids a hard dependency while the data matches the
+    // descriptor schema the projection fold requires.
+    const sessionAny = this.session as { append(type: string, data: unknown, options?: unknown): { seq: number } }
+    sessionAny.append('subagent/descriptor', {
+      version: SUBAGENT_DESCRIPTOR_VERSION,
+      mode: 'one-shot',
+      provider,
+      ...label === undefined ? {} : { label },
+    })
+    sessions.announce(this.session)
+
+    // Enter the agent registry BEFORE flipping to `running`, so the Host's
+    // `agent/status` frame lands on a session the client already knows and the
+    // lineage row animates for the whole subagent, not just its tail.
+    if (agents !== undefined) {
+      this.detachAgent = agents.enter(this, parentAgent)
+      agents.announce(this)
+      this.setStatus('running')
+    }
+
+    // Log a request header so the session shows which model it ran on.
+    this.session.append('request/header', {
+      header: canonicalHeader({ config: { provider, model: NATIVE_MODEL_LABEL } }),
+      reason: 'initial' as const,
+    })
+
+    // Append the Task prompt as the child's first user message so the
+    // user can see what the subagent was asked to do.
+    this.seedPrompt(prompt)
+  }
+
+  get status(): AgentStatus {
+    return this.currentStatus
+  }
+
+  /** Publish a status transition; the Host turns this into a session-status frame. */
+  private setStatus(next: AgentStatus): void {
+    if (this.currentStatus === next) return
+    this.currentStatus = next
+    this.dispatch.emit('agent/status', { status: next })
+  }
+
+  // ---- Agent surface -----------------------------------------------------
+  //
+  // The SDK drives this transcript; nothing here accepts input or owns a turn.
+  // The registry entry exists so the child reports live activity, so the input
+  // paths are inert rather than half-implemented. Host routing already refuses
+  // to deliver to an `origin: 'subagent'` session, so these are unreachable
+  // through the API surface.
+
+  /* v8 ignore start -- inert Agent surface; the SDK owns this transcript */
+  send(): void {}
+  followup(): void {}
+  steer(): void {}
+  inject(): void {}
+  cancel(): void {}
+  runMaintenance<T>(): Promise<T> {
+    return Promise.reject(new Error(`subagent "${this.id}" does not run maintenance`))
+  }
+  whenIdle(): Promise<void> {
+    return Promise.resolve()
+  }
+  /* v8 ignore stop */
+
+
+  /**
+   * Seed the Task prompt as the child's first user message. `task_started` is
+   * not ordered against the first subagent frame, so a child may be created
+   * before its prompt is known; `adopt` calls back here once it arrives. The
+   * seed happens at most once.
+   */
+  seedPrompt(prompt: string | undefined): void {
+    if (this.seeded) return
+    if (prompt === undefined || prompt.length === 0) return
+    this.seeded = true
+    this.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: prompt }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+  }
+
+  /** Open the first (or next) turn in the child session. */
+  openTurn(): void {
+    this.turn += 1
+    this.step = 1
+    this.session.append('turn/start', { turn: this.turn })
+    this.session.append('step/start', { turn: this.turn, step: this.step })
+    this.stepFlushed = false
+    this.chunkSeqs = []
+    this.toolCalls.clear()
+    this.reasoningByIndex.clear()
+    this.blockOffset = 0
+    this.maxSeenIndex = -1
+    this.lastRawStart = undefined
+  }
+
+  /** Roll to the next step within the current turn. */
+  rollStep(): void {
+    this.session.append('step/end', { turn: this.turn, step: this.step })
+    this.step += 1
+    this.session.append('step/start', { turn: this.turn, step: this.step })
+    this.stepFlushed = false
+    this.chunkSeqs = []
+    this.toolCalls.clear()
+    this.reasoningByIndex.clear()
+    this.blockOffset = 0
+    this.maxSeenIndex = -1
+    this.lastRawStart = undefined
+  }
+
+  /** Flush coalesced assistant content. */
+  flushAssistant(): void {
+    if (this.pendingContent.length === 0) return
+    const content = this.pendingContent
+    const usage = this.pendingUsage
+    const model = this.pendingModel ?? NATIVE_MODEL_LABEL
+    this.pendingContent = []
+    this.pendingUsage = undefined
+    this.pendingModel = undefined
+    this.reasoningByIndex.clear()
+    this.session.append('assistant/message', {
+      turn: this.turn,
+      step: this.step,
+      message: createAssistantMessage({
+        content,
+        source: { provider: PROVIDER, model },
+      }),
+      ...usage === undefined ? {} : { usage },
+    }, {
+      surfaceOp: 'append',
+      ...this.chunkSeqs.length === 0 ? {} : { sourceEventSeqs: [...this.chunkSeqs] },
+    })
+    this.stepFlushed = true
+  }
+
+  /** Close the current turn and detach the child from the live session store. */
+  closeTurn(): void {
+    if (this.turn === 0) return
+    this.flushAssistant()
+    this.session.append('step/end', { turn: this.turn, step: this.step })
+    this.session.append('turn/end', { turn: this.turn, reason: { kind: 'completed' } })
+    // Mark the session as ended and detach it from the live store so the
+    // UI shows it as inactive rather than perpetually running/green.
+    this.session.append('session/end-seed', {})
+    // Settle the status BEFORE unregistering: the Host reads `status` when it
+    // builds the catalog, and `agent/disposed` fires on detach. Flipping first
+    // means the last frame the client sees for this child is `running: false`,
+    // so the row lands on the settled dot instead of animating forever.
+    this.setStatus('idle')
+    this.detachAgent?.()
+    this.detachAgent = undefined
+    void this.scope.dispose()
+    this.detach()
+    this.turn = 0 // prevent double-close
   }
 }
 
@@ -694,6 +975,69 @@ export class ClaudeCodeAgent implements Agent {
     }
     signal.addEventListener('abort', cancel, { once: true })
     const diagnostics: string[] = []
+
+    // ---- Subagent child sessions ------------------------------------------
+    //
+    // SDK messages with `parent_tool_use_id !== null` are frames from a Task
+    // tool's subagent. Instead of inlining them into the parent transcript
+    // (which interleaves concurrent subagents and has no navigation), each
+    // distinct `parent_tool_use_id` gets its own child session with
+    // `origin: 'subagent'`. The `dsh-client-ui-subagent` package discovers
+    // these through `listChildren(parentSessionId)` and renders them as
+    // navigable entries in the header lineage breadcrumbs, each with its own
+    // trajectory in the right panel — matching the native DeepSeek Loop.
+    const sessionStore = this.loopCtx.get('sessions') as SessionStoreLike | undefined
+    // The registry is what makes a child read as live: the Host derives each
+    // catalog row's activity from `agents.get(id)?.status`. Absent, the child
+    // still records its transcript but renders as already settled.
+    const agentRegistry = this.loopCtx.get('agents') as AgentRegistryLike | undefined
+    /** Per-parent_tool_use_id child sessions for subagent transcripts. */
+    const childSessions = new Map<string, SubagentChildSession>()
+    /** Per-tool_use_id Task metadata captured from task_started system messages. */
+    const taskMeta = new Map<string, { description?: string; prompt?: string }>()
+    /** tool_use_ids the SDK marked ambient; these never get a child session. */
+    const skippedTasks = new Set<string>()
+    /** Warn at most once per query when no session store is in scope. */
+    let warnedNoStore = false
+
+    /**
+     * Get or create the child session for a given parent_tool_use_id.
+     * The first frame for a tool id creates the session and opens its first turn.
+     */
+    const getChildSession = (parentToolUseId: string): SubagentChildSession | undefined => {
+      if (sessionStore === undefined) {
+        if (!warnedNoStore) {
+          warnedNoStore = true
+          diagnostics.push(
+            `agent "${this.id}": no session store in scope; subagent transcripts were dropped`,
+          )
+        }
+        return undefined
+      }
+      // Ambient/housekeeping tasks: the SDK asks consumers to keep these out
+      // of the transcript, so they get no child session and no breadcrumb.
+      if (skippedTasks.has(parentToolUseId)) return undefined
+      let child = childSessions.get(parentToolUseId)
+      if (child === undefined) {
+        // `task_started` is not ordered against the first subagent frame. When
+        // it has not landed yet the child opens without a label or seed prompt
+        // rather than showing a raw tool id; the prompt is backfilled below.
+        const meta = taskMeta.get(parentToolUseId)
+        child = new SubagentChildSession(
+          this.loopCtx,
+          this,
+          sessionStore,
+          agentRegistry,
+          meta?.description,
+          PROVIDER,
+          meta?.prompt,
+        )
+        childSessions.set(parentToolUseId, child)
+        child.openTurn()
+      }
+      return child
+    }
+
     try {
       // The route the selection names is dsh's own; derive the child's provider
       // environment from it rather than from whatever shell launched the host,
@@ -827,14 +1171,36 @@ export class ClaudeCodeAgent implements Agent {
         .map(([, text]) => ({ type: 'reasoning' as const, text }))
 
       signal.throwIfAborted()
+
       for await (const message of query) {
         signal.throwIfAborted()
         switch (message.type) {
           case 'stream_event': {
-            // Subagent (Task) frames carry a parent tool id. They belong to a
-            // nested transcript, not this session's step, and interleaving them
-            // here would split the parent's API turn across bogus boundaries.
-            if (message.parent_tool_use_id !== null) break
+            // Subagent (Task) frames carry a parent tool id — route them to
+            // their own child session so the UI renders them as a navigable
+            // subagent, not as interleaved content in the parent transcript.
+            if (message.parent_tool_use_id !== null) {
+              const child = getChildSession(message.parent_tool_use_id)
+              if (child !== undefined) {
+                const event = message.event
+                if (event.type === 'content_block_start') {
+                  if (child.lastRawStart !== undefined && event.index <= child.lastRawStart) {
+                    child.blockOffset = child.maxSeenIndex + 1
+                  }
+                  child.lastRawStart = event.index
+                }
+                const chunks = rebaseChunkIndices(mapStreamEvent(event, child.toolCalls), child.blockOffset)
+                const highest = maxChunkIndex(chunks)
+                if (highest !== undefined && highest > child.maxSeenIndex) child.maxSeenIndex = highest
+                for (const chunk of chunks) {
+                  child.chunkSeqs.push(child.session.append('assistant/chunk', { turn: child.turn, step: child.step, chunk }).seq)
+                  if (chunk.type === 'reasoning-delta') {
+                    child.reasoningByIndex.set(chunk.index, (child.reasoningByIndex.get(chunk.index) ?? '') + chunk.text)
+                  }
+                }
+              }
+              break
+            }
             const event = message.event
             if (event.type === 'content_block_start') {
               // A fragment boundary shows up as a block index that does not
@@ -856,9 +1222,43 @@ export class ClaudeCodeAgent implements Agent {
             break
           }
           case 'assistant': {
-            // Subagent narration and its nested tool_use blocks are the child
-            // transcript; the parent's Task tool/result already summarizes it.
-            if (message.parent_tool_use_id !== null) break
+            // Route subagent narration and tool calls to the child session.
+            if (message.parent_tool_use_id !== null) {
+              const child = getChildSession(message.parent_tool_use_id)
+              if (child !== undefined) {
+                const mapped = mapAssistantMessage(message.message)
+                const messageId = message.message.id
+                const reasoningOnlyPending = child.pendingContent.length > 0
+                  && child.pendingContent.every(block => block.type === 'reasoning')
+                if (child.pendingMessageId !== undefined && messageId !== child.pendingMessageId && !reasoningOnlyPending) {
+                  child.flushAssistant()
+                }
+                if (child.stepFlushed) child.rollStep()
+                child.pendingMessageId = messageId
+                let content = mapped.content
+                const haveReasoning = child.pendingContent.some(block => block.type === 'reasoning')
+                  || content.some(block => block.type === 'reasoning')
+                if (child.reasoningByIndex.size > 0 && !haveReasoning) {
+                  content = [...[...child.reasoningByIndex.entries()]
+                    .sort((a, b) => a[0] - b[0])
+                    .map(([, text]) => ({ type: 'reasoning' as const, text })), ...content]
+                }
+                if (content.some(block => block.type === 'reasoning')) child.reasoningByIndex.clear()
+                child.pendingContent = [...child.pendingContent, ...content]
+                if (mapped.usage !== undefined) child.pendingUsage = mapped.usage
+                child.pendingModel = mapped.model
+                if (mapped.toolCalls.length > 0) {
+                  child.flushAssistant()
+                  for (const call of mapped.toolCalls) {
+                    child.ownCallIds.add(String(call.callId))
+                    child.session.append('tool/call', {
+                      turn: child.turn, step: child.step, callId: call.callId, name: call.name, arguments: call.arguments,
+                    })
+                  }
+                }
+              }
+              break
+            }
             const mapped = mapAssistantMessage(message.message)
             const messageId = message.message.id
             // A new API turn: close the coalesced one, and roll the step when
@@ -901,16 +1301,31 @@ export class ClaudeCodeAgent implements Agent {
             break
           }
           case 'user': {
+            // Route subagent tool results to the child session. A `user`
+            // message's `parent_tool_use_id` is set for EVERY tool result
+            // (not just subagent ones), so we check whether a child session
+            // exists for it — only then is it a subagent result.
+            if (message.parent_tool_use_id !== null) {
+              const child = childSessions.get(message.parent_tool_use_id)
+              if (child !== undefined) {
+                for (const result of mapToolResults(message.message)) {
+                  if (!child.ownCallIds.has(String(result.source.callId))) continue
+                  child.session.append('tool/result', { turn: child.turn, step: child.step, message: result }, { surfaceOp: 'append' })
+                }
+                break
+              }
+            }
             for (const result of mapToolResults(message.message)) {
-              // Only results for calls this step actually published: a subagent's
-              // nested tool results have no top-level call to pair with and would
-              // render as orphan nodes.
+              // Only results for calls this query actually published: a nested
+              // subagent's tool results go to their child session above.
               if (!ownCallIds.has(String(result.source.callId))) continue
               this.session.append('tool/result', { turn, step, message: result }, { surfaceOp: 'append' })
             }
             break
           }
           case 'result': {
+            // Close all child sessions before settling the parent query.
+            for (const child of childSessions.values()) child.closeTurn()
             // A query that ended mid-coalescing (trailing text, or thinking that
             // never got a following fragment) publishes it here.
             if (pendingContent.length === 0 && reasoningByIndex.size > 0) {
@@ -928,8 +1343,34 @@ export class ClaudeCodeAgent implements Agent {
             break
           }
           default:
-            // init/status/permission/control messages are SDK transport; the
-            // durable log records only the model-visible transcript.
+            // Capture task_started metadata so the child session gets the
+            // initial prompt and description. Other system/transport messages
+            // (init, status, permission, control) are not transcribed.
+            if (
+              'subtype' in message
+              && (message as { subtype?: string }).subtype === 'task_started'
+            ) {
+              const task = message as {
+                tool_use_id?: string
+                description?: string
+                prompt?: string
+                skip_transcript?: boolean
+              }
+              if (task.tool_use_id !== undefined) {
+                // Ambient/housekeeping tasks must stay out of the transcript.
+                if (task.skip_transcript === true) {
+                  skippedTasks.add(task.tool_use_id)
+                  break
+                }
+                taskMeta.set(task.tool_use_id, {
+                  ...task.description === undefined ? {} : { description: task.description },
+                  ...task.prompt === undefined ? {} : { prompt: task.prompt },
+                })
+                // The frames for this task may have arrived first; backfill the
+                // prompt into the already-open child rather than losing it.
+                childSessions.get(task.tool_use_id)?.seedPrompt(task.prompt)
+              }
+            }
             break
         }
       }
@@ -941,6 +1382,8 @@ export class ClaudeCodeAgent implements Agent {
       }
       return { kind: 'completed' }
     } finally {
+      // Close any child sessions that were still open (error/abort path).
+      for (const child of childSessions.values()) child.closeTurn()
       signal.removeEventListener('abort', cancel)
       controller.abort()
       for (const line of diagnostics) this.ctx.logger.warn('%s', line)
