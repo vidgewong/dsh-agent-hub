@@ -770,7 +770,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
     }
   })
 
-  it('drops subagent frames and orphan nested tool results from the top-level transcript', async () => {
+  it('expands subagent transcript into a separate child session with origin subagent', async () => {
     const ctx = await harness()
     try {
       queryMock.mockImplementation(() => stream([
@@ -802,8 +802,20 @@ describe('ClaudeCodeAgent turn mapping', () => {
             },
           },
         } as unknown as SDKMessage,
+        // The SDK announces the Task before streaming its frames; the
+        // description and prompt seed the child session.
+        {
+          type: 'system',
+          subtype: 'task_started',
+          task_id: 't-1',
+          tool_use_id: 'toolu_task',
+          description: 'do something',
+          prompt: 'go do it',
+          uuid: 'u-task-started',
+          session_id: 's-sub',
+        } as unknown as SDKMessage,
         // Child transcript: assistant narration and a nested tool call/result
-        // that belong to the subagent, not to this session's step.
+        // that are routed to a separate child session.
         {
           type: 'assistant',
           parent_tool_use_id: 'toolu_task',
@@ -858,6 +870,13 @@ describe('ClaudeCodeAgent turn mapping', () => {
         } as unknown as SDKMessage,
         successResult(),
       ]))
+      // Capture child sessions as they are created (they are detached after
+      // the subagent finishes and will not appear in ctx.sessions.list()).
+      const createdSessions: import('@deepseek-ai/dsh-session').Session[] = []
+      ctx.on('session/created', (session: import('@deepseek-ai/dsh-session').Session) => {
+        if (session.header.origin === 'subagent') createdSessions.push(session)
+      })
+
       const { agent } = await ctx.agents.create({
         sessionId: SessionId('subagent-s'),
         meta: { cwd: process.cwd() },
@@ -866,20 +885,128 @@ describe('ClaudeCodeAgent turn mapping', () => {
       await agent.whenIdle()
 
       const events = agent.session.events
-      // Only the top-level Task call and its result are transcribed.
+      // Only the top-level Task call and its result are in the parent transcript.
       expect(events.filter(e => e.type === 'tool/call').map(e => (e.data as { callId: string }).callId))
         .toEqual(['toolu_task'])
       expect(events
         .filter(e => e.type === 'tool/result')
         .map(e => String((e.data as { message: { source: { callId: string } } }).message.source.callId)))
         .toEqual(['toolu_task'])
-      // The child's narration never entered the parent transcript.
+      // The child's narration is NOT in the parent transcript.
       const texts = events
         .filter(e => e.type === 'assistant/message')
         .flatMap(e => (e.data as { message: { content: { type: string; text?: string }[] } }).message.content)
         .filter(block => block.type === 'text')
         .map(block => block.text)
       expect(texts).not.toContain('child narration')
+
+      // A child session was created with origin: 'subagent'.
+      expect(createdSessions).toHaveLength(1)
+      const childSession = createdSessions[0]
+      expect(childSession.header.parentSession).toBe('subagent-s')
+
+      // The child session contains the subagent's narration, tool call, and tool result.
+      const childEvents = childSession.events
+      const childTexts = childEvents
+        .filter(e => e.type === 'assistant/message')
+        .flatMap(e => (e.data as { message: { content: { type: string; text?: string }[] } }).message.content)
+        .filter(block => block.type === 'text')
+        .map(block => block.text)
+      expect(childTexts).toContain('child narration')
+      expect(childEvents.filter(e => e.type === 'tool/call').map(e => (e.data as { callId: string }).callId))
+        .toEqual(['toolu_child'])
+      expect(childEvents.filter(e => e.type === 'tool/result').length).toBe(1)
+
+      // The child has a subagent/descriptor event carrying the Task label.
+      const descriptor = childEvents.find(e => e.type === 'subagent/descriptor')
+      expect(descriptor).toBeDefined()
+      expect((descriptor!.data as { mode: string }).mode).toBe('one-shot')
+      expect((descriptor!.data as { label?: string }).label).toBe('do something')
+
+      // The Task prompt is seeded as the child's first user message.
+      const childPrompts = childEvents
+        .filter(e => e.type === 'user/message')
+        .flatMap(e => (e.data as { content: { type: string; text?: string }[] }).content)
+        .map(block => block.text)
+      expect(childPrompts).toContain('go do it')
+
+      // The child session was detached (not in the live store) after completion.
+      expect(ctx.sessions.list().find(s => s.header.origin === 'subagent')).toBeUndefined()
+
+      // The child has a session/end-seed event marking its lifecycle as ended.
+      expect(childEvents.find(e => e.type === 'session/end-seed')).toBeDefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('gives an ambient skip_transcript task no child session', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        // An ambient/housekeeping task: the SDK asks consumers to keep it out
+        // of the transcript, so it must not surface as a subagent breadcrumb.
+        {
+          type: 'system',
+          subtype: 'task_started',
+          task_id: 't-ambient',
+          tool_use_id: 'toolu_ambient',
+          description: 'housekeeping',
+          prompt: 'tidy up',
+          skip_transcript: true,
+          uuid: 'u-ambient-started',
+          session_id: 's-sub',
+        } as unknown as SDKMessage,
+        {
+          type: 'assistant',
+          parent_tool_use_id: 'toolu_ambient',
+          uuid: 'u-ambient',
+          session_id: 's-sub',
+          message: {
+            id: 'msg-ambient',
+            container: null,
+            context_management: null,
+            role: 'assistant',
+            type: 'message',
+            content: [{ type: 'text', text: 'ambient narration' }],
+            stop_reason: 'end_turn',
+            stop_sequence: null,
+            stop_details: null,
+            model: 'claude-sonnet-4-5',
+            usage: {
+              cache_creation: null,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+              inference_geo: null,
+              input_tokens: 1,
+              iterations: null,
+              output_tokens: 1,
+              server_tool_use: null,
+            },
+          },
+        } as unknown as SDKMessage,
+        successResult(),
+      ]))
+      const createdSessions: import('@deepseek-ai/dsh-session').Session[] = []
+      ctx.on('session/created', (session: import('@deepseek-ai/dsh-session').Session) => {
+        if (session.header.origin === 'subagent') createdSessions.push(session)
+      })
+
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('ambient-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      // No child session, and the narration never reached the parent either.
+      expect(createdSessions).toHaveLength(0)
+      const texts = agent.session.events
+        .filter(e => e.type === 'assistant/message')
+        .flatMap(e => (e.data as { message: { content: { type: string; text?: string }[] } }).message.content)
+        .filter(block => block.type === 'text')
+        .map(block => block.text)
+      expect(texts).not.toContain('ambient narration')
     } finally {
       await ctx.fiber.dispose()
     }

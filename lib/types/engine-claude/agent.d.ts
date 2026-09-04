@@ -9,7 +9,8 @@
 import type { Agent, AgentCancelCause, AgentOptions, AgentStatus, CancelOptions, InboxTarget } from '@deepseek-ai/dsh-agent';
 import { Inbox } from '@deepseek-ai/dsh-agent';
 import type { Scope } from '@deepseek-ai/dsh-scope';
-import type { Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session';
+import type { Session, UserMessage } from '@deepseek-ai/dsh-session';
+import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ResolvedConfig } from './types.ts';
 /** Drives one session through turn and step boundaries on Claude Code. */
