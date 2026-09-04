@@ -164,7 +164,7 @@ function failureCode(subtype: SDKResultError['subtype']): string {
  * `@deepseek-ai/dsh-subagent/descriptor.SUBAGENT_DESCRIPTOR_VERSION` so the
  * native projection unit classifies these child sessions correctly.
  */
-const SUBAGENT_DESCRIPTOR_VERSION = 2
+const SUBAGENT_DESCRIPTOR_VERSION = 3
 
 /** Minimal session store shape (avoiding a peer dep on SessionStore). */
 interface SessionStoreLike {
