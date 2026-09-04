@@ -4,7 +4,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.1.0-rc11",
+  "version": "0.1.0-rc12",
   "repository": "github:vidgewong/dsh-agent-hub",
   "type": "module",
   "main": "lib/index.js",
@@ -37,9 +37,12 @@
   "license": "MIT",
   "scripts": {
     "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "dev": "./dev-install.sh && node build.mjs --watch",
     "typecheck": "tsc -p tsconfig.build.json --noEmit",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "node build.mjs"
   },
   "dsh": {
     "bundle": {

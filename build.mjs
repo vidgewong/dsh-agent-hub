@@ -9,13 +9,18 @@
  *   3. browser half: esbuild bundles src/client/index.ts into lib/client.js
  *      as a client-module factory (window.__ModuleLoader__.load + cjs closure)
  *
- * Usage: node build.mjs
+ * Usage:
+ *   node build.mjs           # one-shot build (host + client + types)
+ *   node build.mjs --watch   # watch: rebuild client on src/client/** changes
+ *                             #   (host needs `dsh web` restart anyway)
  */
-import { build } from 'esbuild'
+import { build, context } from 'esbuild'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
 const PACKAGE_ID = '@vidge/dsh-agent-hub'
+
+const watchMode = process.argv.includes('--watch')
 
 /** Run a command and inherit its streams; exit on failure. */
 function run(command, args) {
@@ -85,6 +90,26 @@ const BROWSER_EXTERNALS = [
   '@deepseek-ai/dsh-client-ui-primitives',
 ]
 
+/** Shared esbuild options for the browser client-module bundle. */
+const clientBuildOptions = {
+  entryPoints: ['src/client/index.ts'],
+  bundle: true,
+  format: 'cjs',
+  platform: 'browser',
+  target: 'es2022',
+  jsx: 'automatic',
+  external: BROWSER_EXTERNALS,
+  sourcemap: true,
+  banner: {
+    js: `var module = { exports: {} }; var exports = module.exports; window.__ModuleLoader__.load({ id: ${JSON.stringify(PACKAGE_ID)}, factory: (require) => {`,
+  },
+  footer: {
+    js: 'return module.exports; } });',
+  },
+  outfile: 'lib/client.js',
+}
+
+// ---------- One-shot build ----------
 // 1. tsc emit (declarations + the type graph both halves import)
 runTsc()
 
@@ -103,22 +128,32 @@ await build({
 })
 
 // 3. browser client-module bundle
-await build({
-  entryPoints: ['src/client/index.ts'],
-  bundle: true,
-  format: 'cjs',
-  platform: 'browser',
-  target: 'es2022',
-  jsx: 'automatic',
-  external: BROWSER_EXTERNALS,
-  sourcemap: true,
-  banner: {
-    js: `var module = { exports: {} }; var exports = module.exports; window.__ModuleLoader__.load({ id: ${JSON.stringify(PACKAGE_ID)}, factory: (require) => {`,
-  },
-  footer: {
-    js: 'return module.exports; } });',
-  },
-  outfile: 'lib/client.js',
-})
-
-console.log('build ok: lib/index.js lib/invariant.js lib/client.js')
+if (watchMode) {
+  // Build once, then enter watch mode. esbuild watch detects src/client/**
+  // changes and rewrites lib/client.js; dsh's client-hmr plugin stat-polls
+  // that file and pushes a rebuilt frame to the browser — no page refresh.
+  const ctx = await context({
+    ...clientBuildOptions,
+    plugins: [{
+      name: 'rebuild-log',
+      setup(build) {
+        let first = true
+        build.onEnd(result => {
+          if (first) { first = false; return }
+          const errors = result.errors.length
+          if (errors > 0) {
+            console.error(`[watch] client rebuild failed: ${errors} error(s)`)
+          } else {
+            console.log(`[watch] client rebuilt → lib/client.js  (${new Date().toLocaleTimeString()})`)
+          }
+        })
+      },
+    }],
+  })
+  await ctx.watch()
+  console.log('build ok: lib/index.js lib/invariant.js lib/client.js')
+  console.log('[watch] watching src/client/** → lib/client.js  (Ctrl-C to stop)')
+} else {
+  await build(clientBuildOptions)
+  console.log('build ok: lib/index.js lib/invariant.js lib/client.js')
+}
