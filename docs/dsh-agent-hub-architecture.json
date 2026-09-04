@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "dsh-agent-hub 插件架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1240, 580]
+  },
+  "components": [
+    { "id": "web-gui", "type": "frontend", "label": "DSH Web GUI", "sublabel": "Composer · HeaderBadge", "pos": [50, 70], "size": [145, 52] },
+    { "id": "engine-rpc-client", "type": "frontend", "label": "EngineRpc 客户端", "sublabel": "bind / resolve", "pos": [50, 210], "size": [145, 52] },
+
+    { "id": "connection", "type": "cloud", "label": "Connection RPC", "sublabel": "/loop-engine 通道", "pos": [310, 140], "size": [148, 52] },
+
+    { "id": "cordis", "type": "backend", "label": "Cordis IoC", "sublabel": "Context · Fiber · Service", "pos": [310, 32], "size": [148, 52] },
+
+    { "id": "plugin-entry", "type": "backend", "label": "plugin apply()", "sublabel": "dsh-agent-hub 入口", "pos": [310, 275], "size": [148, 52] },
+
+    { "id": "router", "type": "security", "label": "LoopEngineRouter", "sublabel": "唯一 AgentFactory 槽", "pos": [590, 140], "size": [156, 56] },
+    { "id": "shadow-ctx", "type": "backend", "label": "Shadow Context", "sublabel": "Proxy agents · prompt", "pos": [590, 32], "size": [156, 52] },
+
+    { "id": "engine-inprocess", "type": "backend", "label": "in-process 引擎", "sublabel": "dsh-agent-loop", "pos": [890, 32], "size": [148, 52] },
+    { "id": "engine-claude", "type": "external", "label": "Claude Code", "sublabel": "Claude Agent SDK", "pos": [890, 126], "size": [148, 52] },
+    { "id": "engine-codex", "type": "external", "label": "Codex", "sublabel": "codex app-server", "pos": [890, 220], "size": [148, 52] },
+    { "id": "engine-pi", "type": "external", "label": "Pi", "sublabel": "pi --mode rpc", "pos": [890, 314], "size": [148, 52] },
+
+    { "id": "record-store", "type": "database", "label": "EngineRecordStore", "sublabel": "sidecar .loop-engine.json", "pos": [590, 275], "size": [156, 52] },
+
+    { "id": "settings", "type": "cloud", "label": "Settings 服务", "sublabel": "agent-loop-engine", "pos": [90, 390], "size": [148, 52] },
+    { "id": "patch-mgr", "type": "backend", "label": "PatchManager", "sublabel": "cordis.patch.yml", "pos": [350, 390], "size": [148, 52] },
+    { "id": "skills", "type": "cloud", "label": "Skill 注册表", "sublabel": "按引擎分层注入", "pos": [610, 390], "size": [148, 52] },
+    { "id": "commands", "type": "backend", "label": "Commands 桥接", "sublabel": "Claude Code /slash", "pos": [870, 390], "size": [148, 52] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "浏览器（Client Bundle）", "wraps": ["web-gui", "engine-rpc-client"], "pad": 16 },
+    { "kind": "region", "label": "Node 宿主进程（DSH Harness）", "wraps": ["cordis", "connection", "plugin-entry", "router", "shadow-ctx", "record-store", "settings", "patch-mgr", "skills", "commands"], "pad": 16 },
+    { "kind": "security-group", "label": "引擎路由核心", "wraps": ["router", "shadow-ctx"], "pad": 12 },
+    { "kind": "region", "label": "外部引擎 SDK（可选 peer）", "wraps": ["engine-inprocess", "engine-claude", "engine-codex", "engine-pi"], "pad": 16 }
+  ],
+  "connections": [
+    { "from": "web-gui", "to": "engine-rpc-client", "labelAt": [122, 155] },
+    { "from": "engine-rpc-client", "to": "connection", "label": "rpc.call", "variant": "emphasis" },
+    { "from": "connection", "to": "plugin-entry", "label": "rpc.handle", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "labelAt": [384, 236] },
+    { "from": "cordis", "to": "shadow-ctx", "label": "ctx.extend", "variant": "dashed" },
+    { "from": "plugin-entry", "to": "router", "label": "setFactory(router)", "variant": "emphasis", "fromSide": "right", "toSide": "left", "labelAt": [496, 255] },
+    { "from": "shadow-ctx", "to": "router", "label": "拦截 → register", "variant": "security", "labelAt": [668, 106] },
+    { "from": "router", "to": "engine-inprocess" },
+    { "from": "router", "to": "engine-claude" },
+    { "from": "router", "to": "engine-codex" },
+    { "from": "router", "to": "engine-pi", "route": "orthogonal-h" },
+    { "from": "router", "to": "record-store", "label": "remember / recall", "variant": "dashed", "labelAt": [668, 248] }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "核心设计", "items": ["占据 DSH 唯一 AgentFactory 槽，注册 LoopEngineRouter 路由器", "四个引擎通过 Shadow Context（Proxy）共存，引擎代码不修改", "会话引擎创建时固定，sidecar JSON 持久化，恢复时据此路由"] },
+    { "dot": "emerald", "title": "Cordis IoC 集成", "items": ["shadowAgents 拦截 setFactory → router.register(engine, factory)", "shadowSystemPrompt 去重同名提示变量，首次注册者服务全局", "ctx.inject 按需等待可选服务（connection · settings · llm · tools）"] },
+    { "dot": "violet", "title": "浏览器 ↔ 节点桥 · 扩展", "items": ["EngineRpc 通过 /loop-engine 通道 bind 预留 / resolve 查询引擎", "Settings · PatchManager · Skill 注册表 · Commands 桥接扩展层", "HeaderBadge 以品牌色标识引擎（蓝 · 橙 · 绿 · 紫）"] }
+  ]
+}
