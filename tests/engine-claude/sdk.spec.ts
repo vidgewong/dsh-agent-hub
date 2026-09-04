@@ -138,6 +138,11 @@ describe('claudeQueryOptions', () => {
   it('reports each auto-answered interaction through onUnattended', async () => {
     const reports: string[] = []
     const options = claudeQueryOptions(spec({
+      // This spec wants the "no provider backend configured" routing report,
+      // so pin the child env to nothing inherited: a host shell that exports
+      // ANTHROPIC_BASE_URL (e.g. a dsh-launched session) would otherwise
+      // suppress the diagnostic and shift every report index.
+      providerEnv: {},
       onUnattended: (line) => { reports.push(line) },
     }), new AbortController())
     const denied = await options.canUseTool!('Bash', {}, { signal: new AbortController().signal, toolUseID: 't1', requestId: 'r1' })

@@ -1,3 +1,10 @@
+overrides:
+  # Some 0.1.2-rc.1 harness manifests declare stable-line ranges (^0.1.2 →
+  # `>=0.1.2 <0.2.0-0`) that match no published version — the 0.1.2 line only
+  # ships as the prerelease 0.1.2-rc.1. Pin those specs to the real version.
+  '@deepseek-ai/dsh-tools@>=0.1.2 <0.2.0-0': 0.1.2-rc.1
+  '@deepseek-ai/dsh-session-projection@>=0.1.2 <0.2.0-0': 0.1.2-rc.1
+  '@deepseek-ai/dsh-typert-protocol@>=0.1.2 <0.2.0-0': 0.1.2-rc.1
 allowBuilds:
   esbuild: true
   '@google/genai': true
@@ -8,4 +15,4 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - '@deepseek-ai/cordis@4.0.2'
   - '@deepseek-ai/cosmokit@1.8.3'
-  - '@deepseek-ai/dsh-client-store@0.1.2-alpha.2'
+  - '@deepseek-ai/dsh-client-store@0.1.2-rc.1'

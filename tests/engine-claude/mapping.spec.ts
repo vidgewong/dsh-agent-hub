@@ -6,7 +6,8 @@ import { describe, expect, it } from 'vitest'
 import type { BetaMessage, BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { MessageParam } from '@anthropic-ai/sdk/resources'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
-import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { MessageId } from '@deepseek-ai/dsh-llm'
+import { CallId } from '../../src/llm-compat.ts'
 import {
   mapAssistantMessage,
   mapStreamEvent,

@@ -171,7 +171,7 @@ describe('commit vetoes', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      expect(agent.session.events.some(event => event.type === 'turn/start'
+      expect(agent.session.snapshotEvents().some(event => event.type === 'turn/start'
         || event.type === 'user/message')).toBe(false)
       expect(agent.inbox.nextTurn).toHaveLength(1)
       expect(errors.map(error => error.message)).toEqual(['reject turn-start before commit'])
@@ -208,7 +208,7 @@ describe('commit vetoes', () => {
       queryMock.mockImplementation(() => stream([assistantText('again'), successResult()]))
       agent.followup(message('again'))
       await agent.whenIdle()
-      const ends = agent.session.events.filter(event => event.type === 'turn/end')
+      const ends = agent.session.snapshotEvents().filter(event => event.type === 'turn/end')
       expect(ends).toHaveLength(1)
       expect(ends[0]).toMatchObject({ data: { reason: { kind: 'completed' } } })
     } finally {
@@ -229,7 +229,7 @@ describe('empty-step completion', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
       expect(queryMock).not.toHaveBeenCalled()
-      const end = agent.session.events.at(-1)
+      const end = agent.session.snapshotEvents().at(-1)
       expect(end).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
@@ -259,7 +259,7 @@ describe('empty-step completion', () => {
       await agent.whenIdle()
       expect(proposals).toBe(2)
       expect(queryMock).toHaveBeenCalledTimes(1)
-      const end = agent.session.events.at(-1)
+      const end = agent.session.snapshotEvents().at(-1)
       expect(end).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
@@ -283,9 +283,9 @@ describe('mid-turn input chaining', () => {
       g1.release()
       queryMock.mockImplementation(() => stream([assistantText('second'), successResult()]))
       await agent.whenIdle()
-      const starts = agent.session.events.filter(event => event.type === 'turn/start')
+      const starts = agent.session.snapshotEvents().filter(event => event.type === 'turn/start')
       expect(starts).toHaveLength(2)
-      const users = agent.session.events.filter(event => event.type === 'user/message')
+      const users = agent.session.snapshotEvents().filter(event => event.type === 'user/message')
       expect(users).toHaveLength(2)
       expect(queryMock).toHaveBeenCalledTimes(2)
     } finally {
@@ -308,7 +308,7 @@ describe('mid-turn input chaining', () => {
       g1.release()
       queryMock.mockImplementation(() => stream([assistantText('second'), successResult()]))
       await agent.whenIdle()
-      const steps = agent.session.events.filter(event => event.type === 'step/start')
+      const steps = agent.session.snapshotEvents().filter(event => event.type === 'step/start')
       expect(steps).toHaveLength(2)
       expect(queryMock).toHaveBeenCalledTimes(2)
     } finally {
@@ -332,7 +332,7 @@ describe('mid-turn input chaining', () => {
       g1.release()
       await agent.whenIdle()
       expect(agent.inbox.nextTurn).toHaveLength(1)
-      const ends = agent.session.events.filter(event => event.type === 'turn/end')
+      const ends = agent.session.snapshotEvents().filter(event => event.type === 'turn/end')
       expect(ends[0]).toMatchObject({ data: { reason: { kind: 'aborted', reason: { kind: 'disposed' } } } })
       expect(ends).toHaveLength(1)
     } finally {

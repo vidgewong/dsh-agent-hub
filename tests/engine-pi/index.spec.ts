@@ -87,7 +87,7 @@ describe('createAgent options', () => {
         seed,
         meta: { cwd: process.cwd() },
       })
-      expect(agent.session.events.map(event => event.type)).toContain('turn/start')
+      expect(agent.session.snapshotEvents().map(event => event.type)).toContain('turn/start')
       expect(agent.session.header.cwd).toBe(process.cwd())
     } finally {
       await ctx.fiber.dispose()
