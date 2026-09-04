@@ -876,6 +876,16 @@ describe('ClaudeCodeAgent turn mapping', () => {
       ctx.on('session/created', (session: import('@deepseek-ai/dsh-session').Session) => {
         if (session.header.origin === 'subagent') createdSessions.push(session)
       })
+      // The lineage dot animates off `agent/status`, so record the child
+      // agent's transitions: it must report `running` while the subagent works
+      // and settle to `idle` before it leaves the registry.
+      const statuses: string[] = []
+      ctx.on('agent/status', ({ agent, status }: {
+        agent: import('@deepseek-ai/dsh-agent').Agent
+        status: string
+      }) => {
+        if (agent.session.header.origin === 'subagent') statuses.push(status)
+      })
 
       const { agent } = await ctx.agents.create({
         sessionId: SessionId('subagent-s'),
@@ -932,6 +942,13 @@ describe('ClaudeCodeAgent turn mapping', () => {
 
       // The child session was detached (not in the live store) after completion.
       expect(ctx.sessions.list().find(s => s.header.origin === 'subagent')).toBeUndefined()
+
+      // The child was a live agent reporting `running`, then settled to `idle`.
+      // Without this the Host reads no agent for the child, reports it as
+      // inactive, and the lineage shows a settled dot for the whole run.
+      expect(statuses).toEqual(['running', 'idle'])
+      // It also left the agent registry, so nothing reads as live afterwards.
+      expect(ctx.agents.get(childSession.id)).toBeUndefined()
 
       // The child has a session/end-seed event marking its lifecycle as ended.
       expect(childEvents.find(e => e.type === 'session/end-seed')).toBeDefined()

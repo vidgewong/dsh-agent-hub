@@ -180,6 +180,12 @@ interface SessionStoreLike {
   announce(session: Session): void
 }
 
+/** Minimal agent registry shape used to publish subagent activity. */
+interface AgentRegistryLike {
+  enter(agent: Agent, owner: Agent | undefined): () => void
+  announce(agent: Agent): void
+}
+
 /**
  * One SDK-driven subagent transcript materialised as a dsh child session. The
  * child session has `origin: 'subagent'` in its header and a
@@ -190,11 +196,30 @@ interface SessionStoreLike {
  * session sees only the Task tool call and its final result; the child session
  * stores the full subagent transcript (streaming chunks, assistant messages,
  * tool calls, and tool results).
+ *
+ * It is also a live {@link Agent} in the registry. The Host derives each
+ * catalog row's `activity` from `ctx.agents.get(id)?.status`, so a child that
+ * exists only as a Session always reads as inactive and the lineage renders a
+ * settled green dot while the subagent is still working. Registering the child
+ * makes `agent/status` transitions real, which is what drives the running
+ * animation. The SDK owns the child's turn, so this agent is transcript-only:
+ * it reports status and refuses input rather than driving a loop.
  */
-class SubagentChildSession {
+class SubagentChildSession implements Agent {
   readonly session: Session
+  readonly id: SessionId
+  readonly options: AgentOptions
+  readonly inbox: Inbox
+  readonly scope: Scope
+  readonly ctx: Context
   /** Detach the child session from the live store so it shows as inactive. */
   private readonly detach: () => void
+  /** Remove the child agent from the registry once the subagent settles. */
+  private detachAgent: (() => void) | undefined
+  /** Fused dispatcher for this child's `agent/status` transitions. */
+  private readonly dispatch: AgentEventDispatch
+  /** Live status; `running` from creation until the subagent settles. */
+  private currentStatus: AgentStatus = 'idle'
   /** dsh turn counter inside the child session. */
   turn = 0
   /** dsh step counter inside the current turn. */
@@ -225,15 +250,19 @@ class SubagentChildSession {
   private seeded = false
 
   constructor(
-    parentSession: Session,
+    loopCtx: Context,
+    parentAgent: Agent,
     sessions: SessionStoreLike,
+    agents: AgentRegistryLike | undefined,
     label: string | undefined,
     provider: string,
     /** Initial prompt text from the Task tool arguments. */
     prompt: string | undefined,
   ) {
-    const parentHeader = parentSession.header
+    const parentHeader = parentAgent.session.header
     const childId = SessionId(randomUUID())
+    this.id = childId
+    this.options = parentAgent.options
     this.session = sessions.prepare(childId, {
       meta: {
         ...parentHeader.cwd === undefined ? {} : { cwd: parentHeader.cwd },
@@ -242,6 +271,14 @@ class SubagentChildSession {
         delegationDepth: (parentHeader.delegationDepth ?? 0) + 1,
       },
     })
+    this.dispatch = agentEvents(loopCtx, this)
+    this.inbox = new Inbox(this.session, {
+      inserted: () => undefined,
+      discarded: () => undefined,
+      claimed: () => undefined,
+    })
+    this.scope = createScope(loopCtx, this)
+    this.ctx = this.scope.ctx.extend({ agent: this })
     this.detach = sessions.enter(this.session)
     // Append the descriptor so the projection unit classifies the child.
     // The type name is augmented by @deepseek-ai/dsh-subagent (an optional
@@ -256,6 +293,15 @@ class SubagentChildSession {
     })
     sessions.announce(this.session)
 
+    // Enter the agent registry BEFORE flipping to `running`, so the Host's
+    // `agent/status` frame lands on a session the client already knows and the
+    // lineage row animates for the whole subagent, not just its tail.
+    if (agents !== undefined) {
+      this.detachAgent = agents.enter(this, parentAgent)
+      agents.announce(this)
+      this.setStatus('running')
+    }
+
     // Log a request header so the session shows which model it ran on.
     this.session.append('request/header', {
       header: canonicalHeader({ config: { provider, model: NATIVE_MODEL_LABEL } }),
@@ -266,6 +312,40 @@ class SubagentChildSession {
     // user can see what the subagent was asked to do.
     this.seedPrompt(prompt)
   }
+
+  get status(): AgentStatus {
+    return this.currentStatus
+  }
+
+  /** Publish a status transition; the Host turns this into a session-status frame. */
+  private setStatus(next: AgentStatus): void {
+    if (this.currentStatus === next) return
+    this.currentStatus = next
+    this.dispatch.emit('agent/status', { status: next })
+  }
+
+  // ---- Agent surface -----------------------------------------------------
+  //
+  // The SDK drives this transcript; nothing here accepts input or owns a turn.
+  // The registry entry exists so the child reports live activity, so the input
+  // paths are inert rather than half-implemented. Host routing already refuses
+  // to deliver to an `origin: 'subagent'` session, so these are unreachable
+  // through the API surface.
+
+  /* v8 ignore start -- inert Agent surface; the SDK owns this transcript */
+  send(): void {}
+  followup(): void {}
+  steer(): void {}
+  inject(): void {}
+  cancel(): void {}
+  runMaintenance<T>(): Promise<T> {
+    return Promise.reject(new Error(`subagent "${this.id}" does not run maintenance`))
+  }
+  whenIdle(): Promise<void> {
+    return Promise.resolve()
+  }
+  /* v8 ignore stop */
+
 
   /**
    * Seed the Task prompt as the child's first user message. `task_started` is
@@ -346,6 +426,14 @@ class SubagentChildSession {
     // Mark the session as ended and detach it from the live store so the
     // UI shows it as inactive rather than perpetually running/green.
     this.session.append('session/end-seed', {})
+    // Settle the status BEFORE unregistering: the Host reads `status` when it
+    // builds the catalog, and `agent/disposed` fires on detach. Flipping first
+    // means the last frame the client sees for this child is `running: false`,
+    // so the row lands on the settled dot instead of animating forever.
+    this.setStatus('idle')
+    this.detachAgent?.()
+    this.detachAgent = undefined
+    void this.scope.dispose()
     this.detach()
     this.turn = 0 // prevent double-close
   }
@@ -899,6 +987,10 @@ export class ClaudeCodeAgent implements Agent {
     // navigable entries in the header lineage breadcrumbs, each with its own
     // trajectory in the right panel — matching the native DeepSeek Loop.
     const sessionStore = this.loopCtx.get('sessions') as SessionStoreLike | undefined
+    // The registry is what makes a child read as live: the Host derives each
+    // catalog row's activity from `agents.get(id)?.status`. Absent, the child
+    // still records its transcript but renders as already settled.
+    const agentRegistry = this.loopCtx.get('agents') as AgentRegistryLike | undefined
     /** Per-parent_tool_use_id child sessions for subagent transcripts. */
     const childSessions = new Map<string, SubagentChildSession>()
     /** Per-tool_use_id Task metadata captured from task_started system messages. */
@@ -932,8 +1024,10 @@ export class ClaudeCodeAgent implements Agent {
         // rather than showing a raw tool id; the prompt is backfilled below.
         const meta = taskMeta.get(parentToolUseId)
         child = new SubagentChildSession(
-          this.session,
+          this.loopCtx,
+          this,
           sessionStore,
+          agentRegistry,
           meta?.description,
           PROVIDER,
           meta?.prompt,
