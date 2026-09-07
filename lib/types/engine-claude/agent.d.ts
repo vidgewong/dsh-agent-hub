@@ -1,8 +1,11 @@
 /**
  * Claude Code loop Agent: drives one session through turn and step boundaries
- * with one Claude Agent SDK query per step. Claude Code owns its prompt,
- * tools, and permissions; the durable session log remains the source of truth
- * and the query prompt is a pure serialization of it.
+ * with one Claude Agent SDK query per step, opened in streaming-input mode. The
+ * step seeds the query with the serialized session log and keeps its input
+ * stream open, so a message the user sends mid-turn is pushed into the live
+ * Claude process instead of waiting for the whole turn to tear down. Claude
+ * Code owns its prompt, tools, and permissions; the durable session log remains
+ * the source of truth and every query prompt is a pure serialization of it.
  *
  * @module dsh-agent-hub/engine-claude/agent
  */
@@ -30,6 +33,19 @@ export declare class ClaudeCodeAgent implements Agent {
     private readonly dispatch;
     /** Whether this loop instance has appended its initial/resume request anchor. */
     private requestHeaderLogged;
+    /**
+     * Live injection sink for the step currently streaming a Claude query.
+     *
+     * A running step keeps one SDK query (and one CLI child) open through a
+     * {@link ClaudeInputStream}. While it is set, {@link send} pushes a mid-turn
+     * message straight into that live stream instead of parking it in the inbox
+     * for the next query — so Claude receives it during the turn, not after the
+     * whole turn tears down. The step installs it before its message loop and
+     * clears it in the loop's `finally`; it is undefined whenever no query is
+     * live (idle, between steps, mid pre-step, or after an abort). The sink
+     * returns whether it accepted the message.
+     */
+    private liveSink;
     constructor(loopCtx: Context, id: SessionId, options: AgentOptions, session: Session, config: ResolvedConfig);
     get status(): AgentStatus;
     /** Commit a phase and publish its externally visible status transition. */
