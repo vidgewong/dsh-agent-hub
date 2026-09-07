@@ -11,6 +11,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import { type LoopEngineKey } from './locales.ts';
 export type { LoopEngineComposerSelectInjected, LoopEngineComposerSelectProps, SessionSwitcher } from './LoopEngineComposerSelect.tsx';
 export type { LoopEngineHeaderBadgeInjected, LoopEngineHeaderBadgeProps } from './LoopEngineHeaderBadge.tsx';
+export type { SessionListTintInjected, SessionListTintProps, SessionsListLike } from './SessionListTint.tsx';
 declare module '@deepseek-ai/dsh-client-ui-slots' {
     interface LocaleNamespaceMap {
         /** The loop engine display copy (labels, tooltips). */
