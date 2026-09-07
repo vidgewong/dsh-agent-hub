@@ -9,6 +9,7 @@ import type {
   Options,
   Query,
   SDKMessage,
+  SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
@@ -25,7 +26,7 @@ const loopPlugin = {
   },
 }
 
-type QueryFactory = (params: { prompt: string; options: Options }) => Query
+type QueryFactory = (params: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }) => Query
 
 const queryMock = vi.hoisted(() => vi.fn<QueryFactory>())
 vi.mock('@anthropic-ai/claude-agent-sdk', async importOriginal => ({
@@ -42,6 +43,18 @@ function stream(messages: SDKMessage[]): Query {
     for (const message of messages) yield message
   }
   return Object.assign(inner(), { close: vi.fn() }) as unknown as Query
+}
+
+/** Read the text of the first user message seeded into a streaming-input prompt. */
+async function firstPromptText(prompt: string | AsyncIterable<SDKUserMessage>): Promise<string> {
+  if (typeof prompt === 'string') return prompt
+  for await (const message of prompt) {
+    const content = message.message.content
+    return typeof content === 'string'
+      ? content
+      : content.map(block => (block.type === 'text' ? block.text : '')).join('')
+  }
+  return ''
 }
 
 function assistantText(text: string): SDKMessage {
@@ -225,8 +238,9 @@ describe('ClaudeCodeAgent turn mapping', () => {
 
       const params = queryMock.mock.calls[0]?.[0]
       expect(params).toBeDefined()
-      expect(params!.prompt).toContain('<user>')
-      expect(params!.prompt).toContain('hi')
+      const seededPrompt = await firstPromptText(params!.prompt)
+      expect(seededPrompt).toContain('<user>')
+      expect(seededPrompt).toContain('hi')
       expect(params!.options.persistSession).toBe(true)
       expect(params!.options.permissionMode).toBe('dontAsk')
       expect(params!.options.disallowedTools).toContain('AskUserQuestion')

@@ -17,6 +17,7 @@ import type {
   Options,
   Query,
   SDKMessage,
+  SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import SessionStore, { SessionId, type SessionEvent, type SessionPreparation } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -38,7 +39,7 @@ const loopPlugin = {
 }
 import { DEFAULT_DISPOSE_GRACE_MS } from '../../src/engine-claude/sdk.ts'
 
-type QueryFactory = (params: { prompt: string; options: Options }) => Query
+type QueryFactory = (params: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }) => Query
 
 const queryMock = vi.hoisted(() => vi.fn<QueryFactory>())
 vi.mock('@anthropic-ai/claude-agent-sdk', async importOriginal => ({
@@ -145,6 +146,56 @@ function gatedQuery(): { query: Query; release: () => void; entered: Promise<voi
       yield assistantText('late')
       yield successResult()
     })(), { close: vi.fn() }) as unknown as Query,
+  }
+}
+
+/** Poll a predicate on the microtask/macrotask queue until it holds. */
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 1000 && !predicate(); i += 1) {
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+  }
+}
+
+/**
+ * A streaming-input-aware query double that mirrors the real SDK: it consumes
+ * the live input stream and, for every user message pushed into it, emits one
+ * assistant turn labelled with that turn's index and a success result. The
+ * `entered` promise resolves after the first turn's assistant is yielded, and
+ * the generator waits on `release` before settling that first result — a window
+ * in which the test can inject a mid-turn message that the driver pushes into
+ * the same stream, producing a second turn without a second `query()` call.
+ */
+function streamingQuery(prompt: string | AsyncIterable<SDKUserMessage>): {
+  query: Query
+  release: () => void
+  entered: Promise<void>
+} {
+  let release: (() => void) | undefined
+  let markEntered: (() => void) | undefined
+  const entered = new Promise<void>((resolve) => { markEntered = resolve })
+  async function* inner(): AsyncGenerator<SDKMessage> {
+    let index = 0
+    // A string prompt is single-shot; the streaming double only exercises the
+    // AsyncIterable path the live driver uses.
+    if (typeof prompt === 'string') {
+      yield assistantText('first')
+      yield successResult()
+      return
+    }
+    for await (const _message of prompt) {
+      index += 1
+      yield assistantText(index === 1 ? 'first' : `turn-${index}`)
+      if (index === 1) {
+        markEntered?.()
+        await new Promise<void>((resolve) => { release = resolve })
+      }
+      yield successResult()
+    }
+  }
+  return {
+    entered,
+    release: () => { release?.() },
+    query: Object.assign(inner(), { close: vi.fn() }) as unknown as Query,
   }
 }
 
@@ -268,49 +319,62 @@ describe('empty-step completion', () => {
 })
 
 describe('mid-turn input chaining', () => {
-  it('chains into the next turn when a followup arrives mid-turn', async () => {
+  it('injects a mid-turn followup into the live query instead of a new turn', async () => {
     const ctx = await harness()
     try {
-      const g1 = gatedQuery()
-      queryMock.mockImplementation(() => g1.query)
+      let live: ReturnType<typeof streamingQuery> | undefined
+      queryMock.mockImplementation(({ prompt }) => (live = streamingQuery(prompt)).query)
       const { agent } = await ctx.agents.create({
         sessionId: SessionId('chain-followup'),
         meta: { cwd: process.cwd() },
       })
       agent.followup(message('one'))
-      await g1.entered
-      agent.followup(message('two')) // queued in next-turn while turn 1 runs
-      g1.release()
-      queryMock.mockImplementation(() => stream([assistantText('second'), successResult()]))
+      await waitFor(() => live !== undefined)
+      await live!.entered
+      agent.followup(message('two')) // pushed into the live stream mid-turn
+      live!.release()
       await agent.whenIdle()
+      // One query drove the whole exchange — the injected message reached the
+      // live Claude process rather than spawning a second query.
+      expect(queryMock).toHaveBeenCalledTimes(1)
       const starts = agent.session.snapshotEvents().filter(event => event.type === 'turn/start')
-      expect(starts).toHaveLength(2)
+      expect(starts).toHaveLength(1)
       const users = agent.session.snapshotEvents().filter(event => event.type === 'user/message')
-      expect(users).toHaveLength(2)
-      expect(queryMock).toHaveBeenCalledTimes(2)
+      expect(users.map(event => (event as never as { data: { content: Array<{ text: string }> } }).data.content[0]!.text))
+        .toEqual(['one', 'two'])
+      // The injected message drew a live reply from the same query.
+      const replies = agent.session.snapshotEvents()
+        .filter(event => event.type === 'assistant/message')
+        .map(event => (event as never as { data: { message: { content: Array<{ text: string }> } } }).data.message.content[0]!.text)
+      expect(replies).toContain('turn-2')
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end' })
     } finally {
       await ctx.fiber.dispose()
     }
   })
 
-  it('continues into the next step when a steer arrives mid-turn', async () => {
+  it('injects a mid-turn steer into the live query instead of a new query', async () => {
     const ctx = await harness()
     try {
-      const g1 = gatedQuery()
-      queryMock.mockImplementation(() => g1.query)
+      let live: ReturnType<typeof streamingQuery> | undefined
+      queryMock.mockImplementation(({ prompt }) => (live = streamingQuery(prompt)).query)
       const { agent } = await ctx.agents.create({
         sessionId: SessionId('chain-steer'),
         meta: { cwd: process.cwd() },
       })
       agent.followup(message('one'))
-      await g1.entered
-      agent.steer(message('interrupt')) // next-step, wakes during running
-      g1.release()
-      queryMock.mockImplementation(() => stream([assistantText('second'), successResult()]))
+      await waitFor(() => live !== undefined)
+      await live!.entered
+      agent.steer(message('interrupt')) // pushed into the live stream mid-turn
+      live!.release()
       await agent.whenIdle()
+      expect(queryMock).toHaveBeenCalledTimes(1)
+      const users = agent.session.snapshotEvents().filter(event => event.type === 'user/message')
+      expect(users.map(event => (event as never as { data: { content: Array<{ text: string }> } }).data.content[0]!.text))
+        .toEqual(['one', 'interrupt'])
+      // The injected reply rolls to its own step within the same turn.
       const steps = agent.session.snapshotEvents().filter(event => event.type === 'step/start')
-      expect(steps).toHaveLength(2)
-      expect(queryMock).toHaveBeenCalledTimes(2)
+      expect(steps.length).toBeGreaterThanOrEqual(2)
     } finally {
       await ctx.fiber.dispose()
     }

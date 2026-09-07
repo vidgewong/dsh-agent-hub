@@ -1,8 +1,11 @@
 /**
  * Claude Code loop Agent: drives one session through turn and step boundaries
- * with one Claude Agent SDK query per step. Claude Code owns its prompt,
- * tools, and permissions; the durable session log remains the source of truth
- * and the query prompt is a pure serialization of it.
+ * with one Claude Agent SDK query per step, opened in streaming-input mode. The
+ * step seeds the query with the serialized session log and keeps its input
+ * stream open, so a message the user sends mid-turn is pushed into the live
+ * Claude process instead of waiting for the whole turn to tear down. Claude
+ * Code owns its prompt, tools, and permissions; the durable session log remains
+ * the source of truth and every query prompt is a pure serialization of it.
  *
  * @module dsh-agent-hub/engine-claude/agent
  */
@@ -26,7 +29,7 @@ import type { Session, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-
 import { SessionId, canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import { randomUUID } from 'node:crypto'
-import type { SDKResultError } from '@anthropic-ai/claude-agent-sdk'
+import type { SDKResultError, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { ResolvedConfig } from './types.ts'
 import {
   mapAssistantMessage,
@@ -89,6 +92,70 @@ async function loadClaudeQuery(): Promise<OfficialQuery> {
   )
   return claudeQueryPromise
 }
+/**
+ * A push-driven `AsyncIterable<SDKUserMessage>` for the Claude Agent SDK's
+ * streaming-input mode.
+ *
+ * A string prompt drives one stateless assistant turn and then the CLI child
+ * exits — nothing sent afterwards can reach it, so a message the user types
+ * while Claude is working has to wait for the whole turn to settle before a new
+ * query can pick it up. Streaming input keeps ONE query (and one CLI child)
+ * alive for the whole dsh turn: the driver seeds it with the serialized history
+ * and then `push`es every message the user sends mid-turn, so Claude receives
+ * it immediately instead of at the next turn boundary — matching Claude Code's
+ * own interactive composer.
+ *
+ * The iterator yields queued messages first, then parks on a fresh promise
+ * until the next `push` or `close`. `close` ends the query and lets the CLI
+ * child exit; it is idempotent and safe to call from the driver's teardown.
+ */
+class ClaudeInputStream {
+  private readonly queue: SDKUserMessage[] = []
+  private wake: (() => void) | undefined
+  private closed = false
+
+  /** Enqueue one user message for the live query; a no-op once closed. */
+  push(message: SDKUserMessage): void {
+    if (this.closed) return
+    this.queue.push(message)
+    this.wake?.()
+    this.wake = undefined
+  }
+
+  /** End the input stream so the SDK settles the query and the child exits. */
+  close(): void {
+    if (this.closed) return
+    this.closed = true
+    this.wake?.()
+    this.wake = undefined
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage, void> {
+    while (true) {
+      while (this.queue.length > 0) {
+        // oxlint-disable-next-line typescript/no-non-null-assertion -- guarded by length
+        yield this.queue.shift()!
+      }
+      if (this.closed) return
+      await new Promise<void>((resolve) => { this.wake = resolve })
+    }
+  }
+}
+
+/**
+ * Frame one batch of user text as a single SDK streaming-input message.
+ * @param text - the serialized user turn (already framed by `serializeHistory`).
+ * @returns the SDK user message to push into a live query.
+ */
+function toSdkUserMessage(text: string): SDKUserMessage {
+  return {
+    type: 'user',
+    session_id: '',
+    parent_tool_use_id: null,
+    message: { role: 'user', content: text },
+  } as unknown as SDKUserMessage
+}
+
 /**
  * Model label logged when no layer named a model: Claude Code then owns its
  * model natively, and the header still has to say something.
@@ -455,6 +522,20 @@ export class ClaudeCodeAgent implements Agent {
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
 
+  /**
+   * Live injection sink for the step currently streaming a Claude query.
+   *
+   * A running step keeps one SDK query (and one CLI child) open through a
+   * {@link ClaudeInputStream}. While it is set, {@link send} pushes a mid-turn
+   * message straight into that live stream instead of parking it in the inbox
+   * for the next query — so Claude receives it during the turn, not after the
+   * whole turn tears down. The step installs it before its message loop and
+   * clears it in the loop's `finally`; it is undefined whenever no query is
+   * live (idle, between steps, mid pre-step, or after an abort). The sink
+   * returns whether it accepted the message.
+   */
+  private liveSink: ((message: UserMessage) => boolean) | undefined
+
   constructor(
     private loopCtx: Context,
     public readonly id: SessionId,
@@ -489,6 +570,16 @@ export class ClaudeCodeAgent implements Agent {
   }
 
   send(message: UserMessage, target: InboxTarget, wakeup: boolean): void {
+    // A step with a live Claude query accepts mid-turn input directly: push it
+    // into the running SDK stream (and durably log it) so Claude sees it now,
+    // rather than parking it for a fresh query after this turn tears down. The
+    // sink is present only while a query is actively streaming and its signal
+    // is live, so an aborted or between-steps phase still falls through to the
+    // inbox path below.
+    if (wakeup && this.liveSink !== undefined && this.phase.kind === 'running'
+      && !this.phase.abort.signal.aborted && this.liveSink(message)) {
+      return
+    }
     const wakingAfterAbort = wakeup && this.phase.kind !== 'idle' && this.phase.abort.signal.aborted
     const resolvedTarget = wakingAfterAbort ? 'next-turn' : target
     this.inbox.splice(resolvedTarget, Infinity, 0, [message])
@@ -1038,6 +1129,10 @@ export class ClaudeCodeAgent implements Agent {
       return child
     }
 
+    // Live input stream, referenced in the `finally` below so teardown can
+    // close it however the query loop exits.
+    const input = new ClaudeInputStream()
+
     try {
       // The route the selection names is dsh's own; derive the child's provider
       // environment from it rather than from whatever shell launched the host,
@@ -1062,7 +1157,21 @@ export class ClaudeCodeAgent implements Agent {
         onUnattended: (line) => { diagnostics.push(line) },
       }, controller)
       const officialQuery = await loadClaudeQuery()
-      const query = officialQuery({ prompt, options })
+      // ---- Live streaming input --------------------------------------------
+      //
+      // A string prompt drives one stateless turn and the CLI child then exits,
+      // so a message the user sends while Claude is still working cannot reach
+      // it — it waits for the whole turn to settle before a fresh query picks
+      // it up. Streaming input keeps ONE query alive for the dsh step: the
+      // serialized history is the first stream message, and `send()` pushes
+      // every later mid-turn message into the same stream, so Claude receives
+      // it immediately. Each pushed user message drives exactly one CLI turn
+      // ending in a `result`; the stream is closed once every pushed message
+      // has been answered, which settles the query and ends the dsh step.
+      input.push(toSdkUserMessage(prompt))
+      /** User messages pushed into the live query that have no `result` yet. */
+      let liveInFlight = 1
+      const query = officialQuery({ prompt: input, options })
       let finished = false
       /** Seq numbers of the `assistant/chunk` events that streamed the current step, for replay linking. */
       const chunkSeqs: SessionSeq[] = []
@@ -1169,6 +1278,27 @@ export class ClaudeCodeAgent implements Agent {
       const streamedReasoning = (): ContentBlock[] => [...reasoningByIndex.entries()]
         .sort((a, b) => a[0] - b[0])
         .map(([, text]) => ({ type: 'reasoning' as const, text }))
+
+      // ---- Live mid-turn injection -----------------------------------------
+      //
+      // While this query streams, `send()` routes a mid-turn message here
+      // instead of the inbox: the message is durably logged as a user turn (so
+      // replay and the surface see it exactly where it was accepted) and pushed
+      // into the live stream, which makes the CLI open one more turn for it.
+      // Each accepted message adds one outstanding `result`, tracked by
+      // `liveInFlight`, so the stream is not closed until Claude has answered
+      // every pushed message. Injection during a coalescing API turn first
+      // flushes the pending assistant so the injected user turn lands after the
+      // text it is responding to, then rolls to a fresh step for the reply.
+      this.liveSink = (injected: UserMessage): boolean => {
+        if (signal.aborted) return false
+        flushAssistant()
+        if (stepFlushed) rollStep()
+        this.session.append('user/message', injected, { surfaceOp: 'append' })
+        liveInFlight += 1
+        input.push(toSdkUserMessage(serializeHistory([injected])))
+        return true
+      }
 
       signal.throwIfAborted()
 
@@ -1326,6 +1456,7 @@ export class ClaudeCodeAgent implements Agent {
           case 'result': {
             // Close all child sessions before settling the parent query.
             for (const child of childSessions.values()) child.closeTurn()
+            childSessions.clear()
             // A query that ended mid-coalescing (trailing text, or thinking that
             // never got a following fragment) publishes it here.
             if (pendingContent.length === 0 && reasoningByIndex.size > 0) {
@@ -1334,12 +1465,23 @@ export class ClaudeCodeAgent implements Agent {
             if (pendingContent.length > 0 && stepFlushed) rollStep()
             flushAssistant()
             pendingMessageId = undefined
-            if (message.subtype === 'success') {
-              finished = true
-            } else {
+            if (message.subtype !== 'success') {
               const summary = message.errors[0] ?? `claude code query failed (${message.subtype})`
               throw new LlmError(summary, failureCode(message.subtype))
             }
+            // Each pushed user message yields one `result`. When more are still
+            // in flight (a message was injected while Claude was working), this
+            // result closed one injected turn but the stream stays open for the
+            // next reply. The reply is a new API turn that coalesces into the
+            // step already holding its injected user message, so nothing rolls
+            // here.
+            liveInFlight -= 1
+            if (liveInFlight > 0) break
+            // No injected message is outstanding. Stop accepting live input and
+            // close the stream so the SDK settles the query and the CLI exits.
+            this.liveSink = undefined
+            input.close()
+            finished = true
             break
           }
           default:
@@ -1382,6 +1524,11 @@ export class ClaudeCodeAgent implements Agent {
       }
       return { kind: 'completed' }
     } finally {
+      // Stop accepting live input the moment this query leaves its loop, so a
+      // message that races the teardown falls through to the inbox for the next
+      // query rather than pushing into a stream about to close.
+      this.liveSink = undefined
+      input.close()
       // Close any child sessions that were still open (error/abort path).
       for (const child of childSessions.values()) child.closeTurn()
       signal.removeEventListener('abort', cancel)
