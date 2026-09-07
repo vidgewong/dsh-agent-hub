@@ -66,21 +66,12 @@ export interface LoopEngineComposerSelectInjected {
 export type LoopEngineComposerSelectProps = Partial<InjectFace<LoopEngineComposerSelectInjected>>
 
 /**
- * The slice of the owner's `InputZone.session` this seat reads. `sessionId`
- * identifies the session whose engine to resolve; the seat has no other route
- * to it.
- */
-interface SessionFacts {
-  readonly sessionId: string
-}
-
-/**
- * The rendered face. The renderer spreads the owner's props (`session`, from
- * `InputZone`) over the injected ones, so the session snapshot arrives as a
- * plain prop and needs no hook.
+ * The rendered face. The slot's standard props spread `sessionId` as a
+ * top-level string (not nested inside a `session` object) — see the
+ * `conversation.input.right` contract: `sessionId: SessionId`.
  */
 type ComposerFace = InjectFace<LoopEngineComposerSelectInjected> & {
-  session?: SessionFacts
+  sessionId?: string
 }
 
 const ENGINE_OPTIONS: readonly { value: LoopEngineId; key: keyof typeof en }[] = [
@@ -146,7 +137,7 @@ const frozen: CSSProperties = {
  *   toggle hides it.
  */
 export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): JSX.Element | null {
-  const { rpc, switcher, session, t } = props as ComposerFace
+  const { rpc, switcher, sessionId, t } = props as ComposerFace
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
@@ -157,7 +148,7 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
   // `resolving` separates those two so the seat can say which one it is.
   const [engine, setEngine] = useState<LoopEngineId | undefined>(undefined)
   const [resolving, setResolving] = useState(false)
-  const sessionId = session?.sessionId
+
   useEffect(() => {
     if (sessionId === undefined) {
       setEngine(undefined)
@@ -165,8 +156,6 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
       return
     }
     const abort = new AbortController()
-    // Clear first: showing the previous session's engine against a new session
-    // id is exactly the lie this component exists to remove.
     setEngine(undefined)
     setResolving(true)
     void rpc.resolve(sessionId, abort.signal).then((resolved) => {
@@ -213,7 +202,14 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
     const value = next as LoopEngineId
     if (value === engine || busy) return
     setBusy(true)
-    void switcher.startSessionOn(value).finally(() => { setBusy(false) })
+    void switcher.startSessionOn(value).then((created) => {
+      // Optimistically show the picked engine right away. The session switch
+      // unmounts this component before the async callback fires, so this
+      // `setEngine` targets the about-to-be-disposed instance and is harmless;
+      // the newly mounted instance resolves the engine through the `useEffect`
+      // path (which now reads the correct `sessionId` standard prop).
+      if (created) setEngine(value)
+    }).finally(() => { setBusy(false) })
   }
 
   return (

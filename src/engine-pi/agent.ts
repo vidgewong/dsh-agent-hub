@@ -28,7 +28,7 @@ import { CallId } from '../llm-compat.ts'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ResolvedConfig } from './types.ts'
@@ -93,7 +93,7 @@ type PreparedStep =
 interface HeldMessage {
   readonly content: ContentBlock[]
   /** Durable seqs of the chunks that already streamed this message's live partial. */
-  readonly refs: number[]
+  readonly refs: SessionSeq[]
 }
 
 /** Drives one session through turn and step boundaries on Pi. */
@@ -132,7 +132,7 @@ export class PiAgent implements Agent {
       discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
       claimed: (message, turn) => { this.dispatch.emit('agent/inbox/claimed', { message, turn }) },
     })
-    const lastTurn = session.events.findLast(event => event.type === 'turn/start')?.data.turn ?? 0
+    const lastTurn = session.snapshotEvents().findLast(event => event.type === 'turn/start')?.data.turn ?? 0
     this.phase = { kind: 'idle', lastTurn }
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
@@ -361,7 +361,7 @@ export class PiAgent implements Agent {
    * @returns the permission fields of the query spec.
    */
   private queryPermission(): PiPermission {
-    const fold = resolveSessionPermission(this.session.events)
+    const fold = resolveSessionPermission(this.session.snapshotEvents())
     const sandboxMode = this.config.sandboxMode ?? fold.sandboxMode
     return {
       sandboxMode,
@@ -558,7 +558,7 @@ export class PiAgent implements Agent {
        */
       let settled = false
       /** Seq refs of chunks already streamed for the current agent message. */
-      const chunkSeqs: number[] = []
+      const chunkSeqs: SessionSeq[] = []
       /** The assistant message being assembled; its chunks stream live as items complete. */
       let held: HeldMessage | undefined
       /** Text blocks already block-start-ed, by message content index. */

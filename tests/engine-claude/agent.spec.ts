@@ -9,6 +9,7 @@ import type {
   Options,
   Query,
   SDKMessage,
+  SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
@@ -25,7 +26,7 @@ const loopPlugin = {
   },
 }
 
-type QueryFactory = (params: { prompt: string; options: Options }) => Query
+type QueryFactory = (params: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }) => Query
 
 const queryMock = vi.hoisted(() => vi.fn<QueryFactory>())
 vi.mock('@anthropic-ai/claude-agent-sdk', async importOriginal => ({
@@ -42,6 +43,18 @@ function stream(messages: SDKMessage[]): Query {
     for (const message of messages) yield message
   }
   return Object.assign(inner(), { close: vi.fn() }) as unknown as Query
+}
+
+/** Read the text of the first user message seeded into a streaming-input prompt. */
+async function firstPromptText(prompt: string | AsyncIterable<SDKUserMessage>): Promise<string> {
+  if (typeof prompt === 'string') return prompt
+  for await (const message of prompt) {
+    const content = message.message.content
+    return typeof content === 'string'
+      ? content
+      : content.map(block => (block.type === 'text' ? block.text : '')).join('')
+  }
+  return ''
 }
 
 function assistantText(text: string): SDKMessage {
@@ -167,7 +180,7 @@ describe('ClaudeCodeLoop factory registration', () => {
       })
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } }))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -202,7 +215,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const types = agent.session.events.map(event => event.type)
+      const types = agent.session.snapshotEvents().map(event => event.type)
       expect(types).toContain('turn/start')
       expect(types).toContain('step/start')
       expect(types).toContain('user/message')
@@ -210,7 +223,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       expect(types).toContain('step/end')
       expect(types).toContain('turn/end')
 
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({
         data: {
           message: {
@@ -225,8 +238,9 @@ describe('ClaudeCodeAgent turn mapping', () => {
 
       const params = queryMock.mock.calls[0]?.[0]
       expect(params).toBeDefined()
-      expect(params!.prompt).toContain('<user>')
-      expect(params!.prompt).toContain('hi')
+      const seededPrompt = await firstPromptText(params!.prompt)
+      expect(seededPrompt).toContain('<user>')
+      expect(seededPrompt).toContain('hi')
       expect(params!.options.persistSession).toBe(true)
       expect(params!.options.permissionMode).toBe('dontAsk')
       expect(params!.options.disallowedTools).toContain('AskUserQuestion')
@@ -253,7 +267,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const chunks = agent.session.events.filter(
+      const chunks = agent.session.snapshotEvents().filter(
         (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
       )
       expect(chunks.map(event => event.data.chunk)).toEqual([
@@ -262,7 +276,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
         { type: 'text-delta', index: 0, text: 'world' },
       ])
 
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({
         surfaceOp: 'append',
         sourceEventSeqs: chunks.map(event => event.seq),
@@ -294,7 +308,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant?.data.message.content).toEqual([
         { type: 'reasoning', text: 'first second' },
         { type: 'reasoning', text: 'later' },
@@ -351,7 +365,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant?.data.message.content).toEqual([
         { type: 'reasoning', text: 'from message' },
         { type: 'text', text: 'answer' },
@@ -378,7 +392,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
 
       // The reasoning-only message was held, not appended: exactly one
       // durable assistant message carries both the thinking and the answer.
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: 'split thinking' },
@@ -403,7 +417,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
       expect(assistants[0]?.data.message.content).toEqual([{ type: 'reasoning', text: 'chunked' }])
       expect(assistants[0]?.data.usage).toBeUndefined()
@@ -426,7 +440,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: 'trailing thinking' },
@@ -502,7 +516,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'read it' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const events = agent.session.events
+      const events = agent.session.snapshotEvents()
       const call = events.find(event => event.type === 'tool/call')
       expect(call).toMatchObject({
         data: { callId: 'toolu_999', name: 'Read', arguments: '{"file_path":"x.txt"}' },
@@ -590,7 +604,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'do both' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const events = agent.session.events
+      const events = agent.session.snapshotEvents()
       // The step-coordinate each durable node carries must place every tool
       // call/result in the SAME step as the assistant message that issued it,
       // and each round in an increasing step number.
@@ -700,7 +714,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'read it' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const events = agent.session.events
+      const events = agent.session.snapshotEvents()
       const assistants = events.filter(e => e.type === 'assistant/message')
       // Two API turns → exactly two assistant messages, no tool-only fragment.
       expect(assistants).toHaveLength(2)
@@ -756,7 +770,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const chunks = agent.session.events
+      const chunks = agent.session.snapshotEvents()
         .filter((e): e is Extract<typeof e, { type: 'assistant/chunk' }> => e.type === 'assistant/chunk')
         .map(e => e.data.chunk)
       expect(chunks).toEqual([
@@ -894,7 +908,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'delegate' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const events = agent.session.events
+      const events = agent.session.snapshotEvents()
       // Only the top-level Task call and its result are in the parent transcript.
       expect(events.filter(e => e.type === 'tool/call').map(e => (e.data as { callId: string }).callId))
         .toEqual(['toolu_task'])
@@ -916,7 +930,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       expect(childSession.header.parentSession).toBe('subagent-s')
 
       // The child session contains the subagent's narration, tool call, and tool result.
-      const childEvents = childSession.events
+      const childEvents = childSession.snapshotEvents()
       const childTexts = childEvents
         .filter(e => e.type === 'assistant/message')
         .flatMap(e => (e.data as { message: { content: { type: string; text?: string }[] } }).message.content)
@@ -1018,7 +1032,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
 
       // No child session, and the narration never reached the parent either.
       expect(createdSessions).toHaveLength(0)
-      const texts = agent.session.events
+      const texts = agent.session.snapshotEvents()
         .filter(e => e.type === 'assistant/message')
         .flatMap(e => (e.data as { message: { content: { type: string; text?: string }[] } }).message.content)
         .filter(block => block.type === 'text')
@@ -1065,7 +1079,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       })
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: {
           reason: {
@@ -1089,7 +1103,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       })
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error', error: { code: 'CLAUDE_CODE_NO_RESULT' } } },
       })
@@ -1111,7 +1125,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'two' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const headers = agent.session.events.filter(event => event.type === 'request/header')
+      const headers = agent.session.snapshotEvents().filter(event => event.type === 'request/header')
       expect(headers).toHaveLength(1)
       expect(headers[0]).toMatchObject({
         data: {
@@ -1161,7 +1175,7 @@ describe('ClaudeCodeAgent cancellation and pre-step interception', () => {
       agent.cancel({ kind: 'user' })
       release?.()
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'aborted', reason: { kind: 'user' } } },
       })
@@ -1183,7 +1197,7 @@ describe('ClaudeCodeAgent cancellation and pre-step interception', () => {
       await agent.whenIdle()
       disposeReject()
       expect(queryMock).not.toHaveBeenCalled()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'blocked' } },
       })
@@ -1245,7 +1259,7 @@ describe('configuration validation', () => {
         maxTurns: 4,
         disallowedTools: ['AskUserQuestion', 'ExitPlanMode'],
       })
-      expect(agent.session.events.filter(e => e.type === 'request/header')[0]).toMatchObject({
+      expect(agent.session.snapshotEvents().filter(e => e.type === 'request/header')[0]).toMatchObject({
         data: { header: { config: { provider: 'claude-code', model: 'claude-opus-4-6' } } },
       })
     } finally {
@@ -1315,7 +1329,7 @@ describe('model resolution', () => {
       })
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
       await agent.whenIdle()
-      expect(agent.session.events.filter(e => e.type === 'request/header')[0]).toMatchObject({
+      expect(agent.session.snapshotEvents().filter(e => e.type === 'request/header')[0]).toMatchObject({
         data: { header: { config: { provider: 'copilot-proxy', model: 'claude-opus-4.7' } } },
       })
     } finally {
@@ -1424,7 +1438,7 @@ describe('per-session model selection', () => {
         current: { provider: 'copilot-proxy-anthropic', model: 'claude-opus-5' },
       })
       expect(options.model).toBe('claude-opus-5')
-      expect(agent.session.events.filter(e => e.type === 'request/header')[0]).toMatchObject({
+      expect(agent.session.snapshotEvents().filter(e => e.type === 'request/header')[0]).toMatchObject({
         data: { header: { config: { provider: 'copilot-proxy-anthropic', model: 'claude-opus-5' } } },
       })
     } finally {
@@ -1477,7 +1491,7 @@ describe('per-session model selection', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'two' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const headers = agent.session.events.filter(e => e.type === 'request/header')
+      const headers = agent.session.snapshotEvents().filter(e => e.type === 'request/header')
       expect(headers).toHaveLength(2)
       expect(headers[0]).toMatchObject({
         data: {
@@ -1509,7 +1523,7 @@ describe('per-session model selection', () => {
         agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
         await agent.whenIdle()
       }
-      expect(agent.session.events.filter(e => e.type === 'request/header')).toHaveLength(1)
+      expect(agent.session.snapshotEvents().filter(e => e.type === 'request/header')).toHaveLength(1)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -1532,7 +1546,7 @@ describe('per-session model selection', () => {
       })
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
       expect(queryMock.mock.calls[0]![0].options.model).toBe('claude-opus-4.7')
     } finally {
       await ctx.fiber.dispose()
@@ -1554,7 +1568,7 @@ function textOf(message: UserMessage): string {
 
 /** Collect the durable user messages injected by the skill-invocation seam. */
 function injectedSkillMessages(session: Session): UserMessage[] {
-  return session.events
+  return session.snapshotEvents()
     .filter((event): event is Extract<typeof event, { type: 'user/message' }> => event.type === 'user/message')
     .map(event => event.data)
     .filter(message => (message.source as { kind: string }).kind === 'skill-invocation')
@@ -1723,7 +1737,7 @@ describe('ClaudeCodeAgent skill injection', () => {
       expect(texts[1]).toContain('PROVIDER INSTRUCTIONS')
       expect(texts[2]).toContain('Resources for this skill are managed by provider "file-provider".')
 
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -1754,7 +1768,7 @@ describe('ClaudeCodeAgent skill injection', () => {
 
       expect(get).toHaveBeenCalledTimes(3)
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -1778,7 +1792,7 @@ describe('ClaudeCodeAgent skill injection', () => {
       await agent.whenIdle()
 
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -1809,7 +1823,7 @@ describe('ClaudeCodeAgent skill injection', () => {
       await agent.whenIdle()
 
       expect(get).not.toHaveBeenCalled()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -1841,7 +1855,7 @@ describe('ClaudeCodeAgent skill injection', () => {
 
       expect(get).toHaveBeenCalledTimes(1)
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'aborted' } },
       })
@@ -1870,7 +1884,7 @@ describe('ClaudeCodeAgent skill injection', () => {
       // Injection happens at pre-step, before the step itself fails on the
       // missing working directory.
       expect(injectedSkillMessages(agent.session)).toHaveLength(1)
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error' } },
       })

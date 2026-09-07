@@ -28,7 +28,6 @@ import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { ClaudeCodeLoop, CLAUDE_CODE_BACKENDS, CLAUDE_CODE_PERMISSION_MODES, type Config as ClaudeCodeConfig } from './engine-claude/loop.ts'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES, type Config as CodexConfig } from './engine-codex/loop.ts'
@@ -482,17 +481,23 @@ export function apply(ctx: Context, config: Config): void {
     ctx.logger.warn(`loop-engine: orphan record sweep failed: ${String(error)}`)
   })
 
-  // installSettingsSection always calls setSource before the first onChange,
+  // installSection always calls setSource before the first onChange,
   // so `source` is guaranteed set here; the assertion is a contract guard.
   let source: (() => LoopEngineSettings) | undefined
-  installSettingsSection(ctx, loopEngineSettingsNamespace(), LOOP_ENGINE_SETTINGS_SCHEMA, { engine: selected, showInComposer: true }, {
-    setSource: (current) => { source = current },
-    onChange: () => {
-      // This is the default for sessions that reserve no engine of their own.
-      // Sessions already running keep their engine, and resume reads each
-      // session's own record, so nothing is unmounted, no page reload is
-      // needed, and no restart.
-      selected = source!().engine
-    },
+  // Since dsh-settings 0.1.2 the optional-settings wiring (composition base
+  // layer, detach fallback) lives on the provider itself; the inject only
+  // bounds it to a mounted settings service, as the removed free-function
+  // helper used to do.
+  ctx.inject(['settings'], (settingsCtx: Context) => {
+    settingsCtx.settings.installSection(ctx, loopEngineSettingsNamespace(), LOOP_ENGINE_SETTINGS_SCHEMA, { engine: selected, showInComposer: true }, {
+      setSource: (current) => { source = current },
+      onChange: () => {
+        // This is the default for sessions that reserve no engine of their own.
+        // Sessions already running keep their engine, and resume reads each
+        // session's own record, so nothing is unmounted, no page reload is
+        // needed, and no restart.
+        selected = source!().engine
+      },
+    })
   })
 }

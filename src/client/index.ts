@@ -15,10 +15,15 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 // `conversation.input.right` composer seat and the
 // `conversation.session.header.actions` header seat this plugin registers at.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+// Type-only: pulls ui-layout's SlotMap merge, which declares the frame-wide
+// `shell.overlay` seat the session-list tinter mounts in.
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import { LoopEngineComposerSelect } from './LoopEngineComposerSelect.tsx'
 import type { LoopEngineComposerSelectInjected, SessionSwitcher } from './LoopEngineComposerSelect.tsx'
 import { LoopEngineHeaderBadge } from './LoopEngineHeaderBadge.tsx'
 import type { LoopEngineHeaderBadgeInjected } from './LoopEngineHeaderBadge.tsx'
+import { SessionListTint } from './SessionListTint.tsx'
+import type { SessionListTintInjected, SessionsListLike } from './SessionListTint.tsx'
 import { EngineRpc, type ConnectionLike } from './engine-rpc.ts'
 import { sessionLocation } from './session-location.ts'
 import type { SessionListLike, WorkspaceViewLike } from './session-location.ts'
@@ -27,6 +32,7 @@ import type { LoopEngineId } from '../namespace.ts'
 
 export type { LoopEngineComposerSelectInjected, LoopEngineComposerSelectProps, SessionSwitcher } from './LoopEngineComposerSelect.tsx'
 export type { LoopEngineHeaderBadgeInjected, LoopEngineHeaderBadgeProps } from './LoopEngineHeaderBadge.tsx'
+export type { SessionListTintInjected, SessionListTintProps, SessionsListLike } from './SessionListTint.tsx'
 
 /**
  * The client session service this plugin drives, declared structurally so the
@@ -124,6 +130,10 @@ export function apply(ctx: ClientContext): void {
 
     const composerInjected = (): LoopEngineComposerSelectInjected => ({ rpc, switcher, t })
     const badgeInjected = (): LoopEngineHeaderBadgeInjected => ({ rpc, t })
+    const tintInjected = (): SessionListTintInjected => ({
+      rpc,
+      sessions: scope.get('sessions') as SessionsListLike | undefined,
+    })
 
     scope.effect(() => scope.slots.register({
       name: 'conversation.input.right',
@@ -142,5 +152,16 @@ export function apply(ctx: ClientContext): void {
       locale: NS,
       inject: badgeInjected,
     }, LoopEngineHeaderBadge), 'loop-engine: session header engine badge')
+
+    // A headless seat in the frame-wide overlay: always mounted, root-scoped,
+    // it paints each sidebar session row with its engine's accent colour. It has
+    // no visible output of its own — see SessionListTint for why the session
+    // list is enhanced by observation rather than a per-row Slot (there is none).
+    scope.effect(() => scope.slots.register({
+      name: 'shell.overlay',
+      id: 'loop-engine-tint',
+      order: 0,
+      inject: tintInjected,
+    }, SessionListTint), 'loop-engine: session list engine tint')
   })
 }
