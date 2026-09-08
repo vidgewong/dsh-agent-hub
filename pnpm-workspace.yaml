@@ -1,3 +1,6 @@
+autoInstallPeers: true
+strictPeerDependencies: false
+
 overrides:
   # Some 0.1.2-rc.1 harness manifests declare stable-line ranges (^0.1.2 →
   # `>=0.1.2 <0.2.0-0`) that match no published version — the 0.1.2 line only
