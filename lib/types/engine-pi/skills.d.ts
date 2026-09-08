@@ -19,7 +19,7 @@
  * at composition time — the filesystem subset above is authoritative for the
  * web menu.
  *
- * @module dsh-agent-hub/engine-pi/skills
+ * @module dsh-omniloop/engine-pi/skills
  */
 import type { SkillCandidate, SkillDefinition, SkillLookupOptions, SkillProvider, SkillProviderControl } from '../skills.ts';
 /**

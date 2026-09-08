@@ -15,7 +15,7 @@
  * profile's next install prunes. So the message spells out the exact pinned
  * command that records the dependency.
  *
- * @module dsh-agent-hub/driver-core/missing-sdk
+ * @module dsh-omniloop/driver-core/missing-sdk
  */
 
 /** Identity of one engine's optional peer SDK, as declared in `peerDependencies`. */

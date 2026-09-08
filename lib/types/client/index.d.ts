@@ -5,7 +5,7 @@
  * by engine so a session's kernel is legible at a glance. There is no settings
  * page: the engine is a per-session fact, not a global default worth a knob.
  * Export discipline: packages/client/AGENTS.md.
- * @module dsh-agent-hub/client
+ * @module dsh-omniloop/client
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import { type LoopEngineKey } from './locales.ts';

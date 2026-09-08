@@ -1,4 +1,4 @@
-# Bundle patch layer of @vidge/dsh-agent-hub, applied when the loader expands
+# Bundle patch layer of @vidge/dsh-omniloop, applied when the loader expands
 # this bundle — before any plugin's apply() runs. Both rows must live here.
 #
 # Disabling `agent-loop` is a BOOT-TIME fact, not something this plugin can do
@@ -19,4 +19,4 @@
 
 - insert:
     - id: loop-engine
-      name: '@vidge/dsh-agent-hub'
+      name: '@vidge/dsh-omniloop'

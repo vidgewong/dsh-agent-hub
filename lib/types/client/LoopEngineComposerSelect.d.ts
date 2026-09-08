@@ -28,7 +28,7 @@
  *
  * Styling is token-driven inline styles like the section (the client-module
  * bundle is esbuild-built without a CSS loader).
- * @module dsh-agent-hub/client/composer
+ * @module dsh-omniloop/client/composer
  */
 import { type JSX } from 'react';
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots';

@@ -5,7 +5,7 @@
  * exact projection, so a later replay of the same log derives the identical
  * prompt (Model-visible ⟺ logged bridge).
  *
- * @module dsh-agent-hub/driver-core/prompt
+ * @module dsh-omniloop/driver-core/prompt
  */
 
 import type {

@@ -7,7 +7,7 @@
  * Code owns its prompt, tools, and permissions; the durable session log remains
  * the source of truth and every query prompt is a pure serialization of it.
  *
- * @module dsh-agent-hub/engine-claude/agent
+ * @module dsh-omniloop/engine-claude/agent
  */
 
 import type {

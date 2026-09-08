@@ -7,7 +7,7 @@
  * engine-tagged block from the era when the block encoded the selection. The
  * companion asserts these against the pure transform.
  *
- * @module dsh-agent-hub/invariant
+ * @module dsh-omniloop/invariant
  */
 import type { Context } from '@deepseek-ai/cordis';
 /** Cordis companion plugin name. */

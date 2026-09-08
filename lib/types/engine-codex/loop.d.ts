@@ -1,13 +1,13 @@
 /**
  * Codex loop engine module: hosts the AgentFactory that drives every session
  * through the OpenAI Codex SDK, one stateless thread per dsh step, with the
- * durable session log as the sole source of model context. dsh-agent-hub
+ * durable session log as the sole source of model context. dsh-omniloop
  * constructs this factory when the Codex engine is selected; this module is a
  * library, not a Cordis plugin entry. The Codex SDK spawns its own CLI binary
  * (no spawn injection seam), so this loop deliberately does not inject the dsh
  * subprocess service.
  *
- * @module dsh-agent-hub/engine-codex
+ * @module dsh-omniloop/engine-codex
  */
 import { Service } from '@deepseek-ai/cordis';
 import type { Context } from '@deepseek-ai/cordis';

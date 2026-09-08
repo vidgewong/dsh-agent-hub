@@ -7,7 +7,7 @@
  * the session id type, and an AbortController — so the two loop modules share
  * them verbatim.
  *
- * @module dsh-agent-hub/driver-core/ownership
+ * @module dsh-omniloop/driver-core/ownership
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { SessionId } from '@deepseek-ai/dsh-session';

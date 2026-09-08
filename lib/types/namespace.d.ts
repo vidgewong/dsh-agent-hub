@@ -8,7 +8,7 @@
  * `./settings.ts` — which imports `dsh-settings` — pulls the whole host-side
  * settings module into the client build. Anything both halves need as a
  * *value* belongs here; `./settings.ts` re-exports it for the node half.
- * @module dsh-agent-hub/namespace
+ * @module dsh-omniloop/namespace
  */
 /** Settings namespace carrying the deployment's selected agent loop engine. */
 export declare const LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL = "agent-loop-engine";

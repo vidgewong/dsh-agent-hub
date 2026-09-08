@@ -3,7 +3,7 @@
  * `codex app-server` as a child process, sends JSON-RPC 2.0 requests over
  * stdin, and reads newline-delimited JSON responses/notifications from stdout.
  *
- * @module dsh-agent-hub/engine-codex/appserver/client
+ * @module dsh-omniloop/engine-codex/appserver/client
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -104,7 +104,7 @@ export class AppServerClient {
   async initialize(): Promise<InitializeResult> {
     const params: InitializeParams = {
       clientInfo: {
-        name: 'dsh-agent-hub',
+        name: 'dsh-omniloop',
         title: null,
         version: '0.1.1-rc.2',
       },

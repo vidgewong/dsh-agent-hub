@@ -1,8 +1,8 @@
-# AGENTS.md — dsh-agent-hub
+# AGENTS.md — dsh-omniloop
 
 ## What This Project Is
 
-`dsh-agent-hub` (`@vidge/dsh-agent-hub`) is a **DSH (DeepSeek Harness) plugin** that provides **per-session agent loop engine routing**. It occupies the harness's single `AgentFactory` slot and installs a `LoopEngineRouter` that dispatches each session to one of four engines:
+`dsh-omniloop` (`@vidge/dsh-omniloop`) is a **DSH (DeepSeek Harness) plugin** that provides **per-session agent loop engine routing**. It occupies the harness's single `AgentFactory` slot and installs a `LoopEngineRouter` that dispatches each session to one of four engines:
 
 | Engine ID | SDK | Transport |
 |---|---|---|
@@ -175,7 +175,7 @@ Tests are in `tests/` and mirror the source structure. Key test files:
 ### Install into DSH
 
 ```bash
-dsh plugin --profile web add @vidge/dsh-agent-hub
+dsh plugin --profile web add @vidge/dsh-omniloop
 # Then restart dsh web once. After that, engine selection is runtime state.
 ```
 

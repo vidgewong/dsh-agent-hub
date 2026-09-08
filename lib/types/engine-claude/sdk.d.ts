@@ -3,7 +3,7 @@
  * the headless interaction policy. The driver runs exactly one query per dsh
  * step; this module owns no session state.
  *
- * @module dsh-agent-hub/engine-claude/sdk
+ * @module dsh-omniloop/engine-claude/sdk
  */
 import type { Options, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess';

@@ -22,7 +22,7 @@
  * over `.env` files, any of which may change under a long-lived host — so a
  * cached secret would outlive its source.
  *
- * @module dsh-agent-hub/engine-claude/provider-env
+ * @module dsh-omniloop/engine-claude/provider-env
  */
 
 import type { Context } from '@deepseek-ai/cordis'

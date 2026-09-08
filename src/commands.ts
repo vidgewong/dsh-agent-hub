@@ -17,7 +17,7 @@
  * are cwd-dependent, and a global dsh registration would collide across
  * projects.
  *
- * @module dsh-agent-hub/commands
+ * @module dsh-omniloop/commands
  */
 
 import { readdirSync, readFileSync } from 'node:fs'

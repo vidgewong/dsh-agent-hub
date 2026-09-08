@@ -1,11 +1,23 @@
 {
-  "name": "@vidge/dsh-agent-hub",
-  "description": "Per-session agent loop engine router for DSH — run Claude Code, Codex, pi, or the in-process loop per session, all on DSH's unified session, LLM, and tracing substrate",
+  "name": "@vidge/dsh-omniloop",
+  "description": "Run Claude Code, Codex, Pi, or the built-in loop side by side in one dsh — pick the engine per session, switch without restarting, keep one session store, history, and trace.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "claude-code",
+    "codex",
+    "pi",
+    "coding-agent",
+    "agent-loop",
+    "agent-engine",
+    "cordis",
+    "plugin"
+  ],
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.1.0-rc15",
-  "repository": "github:vidgewong/dsh-agent-hub",
+  "version": "0.1.0-rc1",
+  "repository": "github:vidgewong/dsh-omniloop",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
