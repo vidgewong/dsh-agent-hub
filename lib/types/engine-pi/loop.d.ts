@@ -2,13 +2,13 @@
  * Pi loop engine module: hosts the AgentFactory that drives every session
  * through the Pi CLI (`@earendil-works/pi-coding-agent`) over its JSONL RPC
  * mode, one stateless session per dsh step, with the durable session log as the
- * sole source of model context. dsh-agent-hub constructs this factory when
+ * sole source of model context. dsh-omniloop constructs this factory when
  * the Pi engine is selected; this module is a library, not a Cordis plugin
  * entry. Pi has no permission system, so the entire `pi --mode rpc` child is
  * spawned through the dsh subprocess seam — the only available privilege
  * boundary — and its `--tools` are pruned to the resolved sandbox stance.
  *
- * @module dsh-agent-hub/engine-pi
+ * @module dsh-omniloop/engine-pi
  */
 import { Service } from '@deepseek-ai/cordis';
 import type { Context } from '@deepseek-ai/cordis';

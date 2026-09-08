@@ -9,7 +9,7 @@
  * no interactive approval callback, so permissions are folded declaratively
  * into each thread's `sandboxMode`/`approvalPolicy`.
  *
- * @module dsh-agent-hub/engine-codex/agent
+ * @module dsh-omniloop/engine-codex/agent
  */
 
 import type {

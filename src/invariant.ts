@@ -7,7 +7,7 @@
  * engine-tagged block from the era when the block encoded the selection. The
  * companion asserts these against the pure transform.
  *
- * @module dsh-agent-hub/invariant
+ * @module dsh-omniloop/invariant
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -20,7 +20,7 @@ import {
   renderManagedBlock,
 } from './patch-manager.ts'
 
-const PACKAGE_NAME = 'dsh-agent-hub'
+const PACKAGE_NAME = 'dsh-omniloop'
 
 /** Cordis companion plugin name. */
 export const name = 'loop-engine-invariant'

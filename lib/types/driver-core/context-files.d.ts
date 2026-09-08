@@ -9,7 +9,7 @@
  * the dsh skill-injection seam (`/name` gestures) can carry it into the
  * prompt; the body-loading helpers below feed both providers' list/get paths.
  *
- * @module dsh-agent-hub/driver-core/context-files
+ * @module dsh-omniloop/driver-core/context-files
  */
 /** Per-directory context-file resolution policy for one engine. */
 export interface ContextFilePolicy {

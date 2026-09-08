@@ -23,7 +23,7 @@
  * contract surface for two internal methods. This plugin owns both ends of this
  * channel, so it validates its own payloads and needs no codec at all.
  *
- * @module dsh-agent-hub/rpc
+ * @module dsh-omniloop/rpc
  */
 
 import { LOOP_ENGINE_IDS, type LoopEngineId } from './settings.ts'

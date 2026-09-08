@@ -2,7 +2,7 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "dsh-agent-hub 插件架构",
+    "title": "dsh-omniloop 插件架构",
     "locale": "zh-CN",
     "quality_profile": "showcase",
     "viewBox": [1240, 580]
@@ -15,7 +15,7 @@
 
     { "id": "cordis", "type": "backend", "label": "Cordis IoC", "sublabel": "Context · Fiber · Service", "pos": [310, 32], "size": [148, 52] },
 
-    { "id": "plugin-entry", "type": "backend", "label": "plugin apply()", "sublabel": "dsh-agent-hub 入口", "pos": [310, 275], "size": [148, 52] },
+    { "id": "plugin-entry", "type": "backend", "label": "plugin apply()", "sublabel": "dsh-omniloop 入口", "pos": [310, 275], "size": [148, 52] },
 
     { "id": "router", "type": "security", "label": "LoopEngineRouter", "sublabel": "唯一 AgentFactory 槽", "pos": [590, 140], "size": [156, 56] },
     { "id": "shadow-ctx", "type": "backend", "label": "Shadow Context", "sublabel": "Proxy agents · prompt", "pos": [590, 32], "size": [156, 52] },

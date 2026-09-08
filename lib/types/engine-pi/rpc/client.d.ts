@@ -8,7 +8,7 @@
  * correlates command responses by the optional `id` field while dispatching
  * every non-response line to a buffered event stream.
  *
- * @module dsh-agent-hub/engine-pi/rpc/client
+ * @module dsh-omniloop/engine-pi/rpc/client
  */
 import type { ChildProcess } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';

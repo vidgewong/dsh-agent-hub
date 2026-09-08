@@ -1,6 +1,9 @@
-# dsh-agent-hub
+# dsh-omniloop
 
-[![npm version](https://img.shields.io/npm/v/@vidge/dsh-agent-hub?color=cb3837)](https://www.npmjs.com/package/@vidge/dsh-agent-hub)
+[![npm version](https://img.shields.io/npm/v/@vidge/dsh-omniloop?color=cb3837)](https://www.npmjs.com/package/@vidge/dsh-omniloop)
+
+> **Claude Code、Codex、Pi 与 dsh 内置 loop，在同一个 dsh 里并存。
+> 引擎按会话选择，不用重启，也不是全局切换。**
 
 在 **dsh** 上运行任意 agent loop 引擎——内置的 in-process loop、Claude Code、
 Codex、Pi——**按会话选择**，并且全部共用 dsh 自己的会话存储、消息格式、模型调度
@@ -9,7 +12,7 @@ Codex、Pi——**按会话选择**，并且全部共用 dsh 自己的会话存�
 像选模型一样选引擎：在 composer 里选，开一个新会话。当前会话仍跑在它创建时的引擎
 上。不用重启，不是全局切换，不会打断正在进行的工作。
 
-## 为什么是 hub
+## 为什么是路由器
 
 dsh 整个进程只允许一个 `AgentFactory`。正是这个唯一槽位，使得以往所有做法都只能是
 **全局**选择：要跑 Claude Code 就得禁掉 base loop，profile 里的每个会话都被一起
@@ -46,10 +49,20 @@ fork 出的会话与 subagent 会继承父会话的引擎。
 ## 安装
 
 ```sh
-dsh plugin --profile web add @vidge/dsh-agent-hub
+dsh plugin --profile web add @vidge/dsh-omniloop
 ```
 
 安装后重启一次 `dsh web`。此后引擎选择即为运行时状态——再也不需要因切换而重启。
+
+> **从 `@vidge/dsh-agent-hub` 迁移？** 同一个插件，换了名字。请先卸载旧包，避免两者
+> 同时争抢 factory 槽位：
+>
+> ```sh
+> dsh plugin --profile web remove @vidge/dsh-agent-hub
+> dsh plugin --profile web add @vidge/dsh-omniloop
+> ```
+>
+> 已有会话仍保留各自记录的引擎——sidecar 格式没有变化。
 
 > 安装会在 profile 的 `cordis.patch.yml` 中写入一小段托管块，禁用 bundle 自带的
 > `agent-loop` 行，以便路由器接管 factory 槽位并由它自己重新挂载该 loop。文件中
@@ -109,7 +122,7 @@ dsh plugin --profile web add @earendil-works/pi-coding-agent@0.84.3
 卸载插件：
 
 ```sh
-dsh plugin --profile web remove @vidge/dsh-agent-hub
+dsh plugin --profile web remove @vidge/dsh-omniloop
 ```
 
 然后重启 `dsh web`。

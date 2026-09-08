@@ -1,6 +1,6 @@
 # 设计：把 loop engine 从全局选择改为 per-session
 
-**目标仓库**：dsh-agent-hub（本仓）。本文件记录现状、方案与实施步骤。
+**目标仓库**：dsh-omniloop（本仓）。本文件记录现状、方案与实施步骤。
 
 ## 现状
 

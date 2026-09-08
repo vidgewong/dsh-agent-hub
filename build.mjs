@@ -18,7 +18,7 @@ import { build, context } from 'esbuild'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
-const PACKAGE_ID = '@vidge/dsh-agent-hub'
+const PACKAGE_ID = '@vidge/dsh-omniloop'
 
 const watchMode = process.argv.includes('--watch')
 

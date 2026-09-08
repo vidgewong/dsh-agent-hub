@@ -1,6 +1,9 @@
-# dsh-agent-hub
+# dsh-omniloop
 
-[![npm version](https://img.shields.io/npm/v/@vidge/dsh-agent-hub?color=cb3837)](https://www.npmjs.com/package/@vidge/dsh-agent-hub)
+[![npm version](https://img.shields.io/npm/v/@vidge/dsh-omniloop?color=cb3837)](https://www.npmjs.com/package/@vidge/dsh-omniloop)
+
+> **Claude Code, Codex, Pi and dsh's built-in loop — side by side in one dsh.
+> Pick the engine per session. No restart, no global switch.**
 
 Run any agent loop engine on **dsh** — the built-in in-process loop, Claude
 Code, Codex, or Pi — **chosen per session**, all sharing dsh's own session
@@ -10,7 +13,7 @@ Pick an engine the way you pick a model: in the composer, when you start a
 session. The session you are in keeps running on the engine it was created
 with. No restart, no global switch, no interrupted work.
 
-## Why a hub
+## Why a router
 
 dsh admits exactly one `AgentFactory` for the whole process. That single slot
 is what forced every earlier approach to be a *global* choice: to run Claude
@@ -53,11 +56,21 @@ Forked sessions and subagents inherit the parent's engine.
 ## Install
 
 ```sh
-dsh plugin --profile web add @vidge/dsh-agent-hub
+dsh plugin --profile web add @vidge/dsh-omniloop
 ```
 
 Restart `dsh web` once after installing. After that, engine selection is
 runtime state — switching never requires a restart again.
+
+> **Coming from `@vidge/dsh-agent-hub`?** Same plugin, new name. Remove the old
+> package first so both never claim the factory slot:
+>
+> ```sh
+> dsh plugin --profile web remove @vidge/dsh-agent-hub
+> dsh plugin --profile web add @vidge/dsh-omniloop
+> ```
+>
+> Existing sessions keep their recorded engine — the sidecar format is unchanged.
 
 > Installing writes a small managed block into the profile's
 > `cordis.patch.yml`, disabling the bundle's own `agent-loop` row so the router
@@ -124,7 +137,7 @@ whether the composer picker is shown.
 To remove the plugin:
 
 ```sh
-dsh plugin --profile web remove @vidge/dsh-agent-hub
+dsh plugin --profile web remove @vidge/dsh-omniloop
 ```
 
 Then restart `dsh web`.

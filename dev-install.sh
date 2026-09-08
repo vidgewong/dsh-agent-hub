@@ -26,15 +26,15 @@
 #
 #  To undo:
 #    cd ~/.dsh/profiles/web
-#    rm -rf node_modules/@vidge/dsh-agent-hub
-#    edit package.json: set "@vidge/dsh-agent-hub" to a published version
+#    rm -rf node_modules/@vidge/dsh-omniloop
+#    edit package.json: set "@vidge/dsh-omniloop" to a published version
 #    pnpm install
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROFILE_DIR="${DSH_HOME:-$HOME/.dsh}/profiles/web"
-INSTALL_DIR="$PROFILE_DIR/node_modules/@vidge/dsh-agent-hub"
+INSTALL_DIR="$PROFILE_DIR/node_modules/@vidge/dsh-omniloop"
 
 # ---------- 1. Build ----------
 echo "==> Building plugin..."

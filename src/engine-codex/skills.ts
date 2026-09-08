@@ -9,7 +9,7 @@
  * contents, so the dsh skill-injection seam (`/name` gestures) can carry it
  * into the prompt.
  *
- * @module dsh-agent-hub/engine-codex/skills
+ * @module dsh-omniloop/engine-codex/skills
  */
 
 import { homedir } from 'node:os'

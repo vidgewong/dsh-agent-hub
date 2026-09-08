@@ -6,7 +6,7 @@
   "status": "pass",
   "visualReview": "pending",
   "artifact": {
-    "path": "/Users/vidgewong/workspace/dsh-agent-hub/dsh-agent-hub-architecture.html",
+    "path": "/Users/vidgewong/workspace/dsh-omniloop/dsh-omniloop-architecture.html",
     "sha256": "1104c044b537a5f096ec571ec492f054913cfdd160557fc5ea4e617c99429a9f",
     "bytes": 724869
   },
@@ -440,7 +440,7 @@
         "viewerChromeActive": true,
         "viewerChromeOk": true,
         "resolvedTheme": "light",
-        "file": "dsh-agent-hub-architecture.visual-check.1440x900.light.png"
+        "file": "dsh-omniloop-architecture.visual-check.1440x900.light.png"
       },
       {
         "width": 1440,
@@ -472,7 +472,7 @@
         "viewerChromeActive": true,
         "viewerChromeOk": true,
         "resolvedTheme": "dark",
-        "file": "dsh-agent-hub-architecture.visual-check.1440x900.dark.png"
+        "file": "dsh-omniloop-architecture.visual-check.1440x900.dark.png"
       },
       {
         "width": 2048,
@@ -504,7 +504,7 @@
         "viewerChromeActive": true,
         "viewerChromeOk": true,
         "resolvedTheme": "light",
-        "file": "dsh-agent-hub-architecture.visual-check.2048x1320.light.png"
+        "file": "dsh-omniloop-architecture.visual-check.2048x1320.light.png"
       },
       {
         "width": 2048,
@@ -536,13 +536,13 @@
         "viewerChromeActive": true,
         "viewerChromeOk": true,
         "resolvedTheme": "dark",
-        "file": "dsh-agent-hub-architecture.visual-check.2048x1320.dark.png"
+        "file": "dsh-omniloop-architecture.visual-check.2048x1320.dark.png"
       }
     ],
-    "contactSheet": "dsh-agent-hub-architecture.visual-check.html"
+    "contactSheet": "dsh-omniloop-architecture.visual-check.html"
   },
   "sidecars": {
-    "receipt": "dsh-agent-hub-architecture.visual-check.json",
-    "contactSheet": "dsh-agent-hub-architecture.visual-check.html"
+    "receipt": "dsh-omniloop-architecture.visual-check.json",
+    "contactSheet": "dsh-omniloop-architecture.visual-check.html"
   }
 }

@@ -8,7 +8,7 @@
  * imports go through cordis services, and `settings-scope.ts` follows the same
  * discipline).
  *
- * @module dsh-agent-hub/settings
+ * @module dsh-omniloop/settings
  */
 import z from '@deepseek-ai/schemastery';
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings';

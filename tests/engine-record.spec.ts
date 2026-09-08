@@ -13,7 +13,7 @@ let home: string
 let previousHome: string | undefined
 
 beforeEach(async () => {
-  home = await mkdtemp(join(tmpdir(), 'dsh-agent-hub-'))
+  home = await mkdtemp(join(tmpdir(), 'dsh-omniloop-'))
   previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
 })

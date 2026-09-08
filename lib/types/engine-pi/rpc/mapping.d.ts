@@ -5,7 +5,7 @@
  * completed tool call, a completed tool execution, and a finished turn's usage
  * — into the durable `tool/call`, `tool/result`, and usage events.
  *
- * @module dsh-agent-hub/engine-pi/rpc/mapping
+ * @module dsh-omniloop/engine-pi/rpc/mapping
  */
 import type { TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm';
 import type { PiUsage } from './types.ts';

@@ -28,7 +28,7 @@
  *
  * Styling is token-driven inline styles like the section (the client-module
  * bundle is esbuild-built without a CSS loader).
- * @module dsh-agent-hub/client/composer
+ * @module dsh-omniloop/client/composer
  */
 
 import { useEffect, useRef, useState, type CSSProperties, type JSX } from 'react'

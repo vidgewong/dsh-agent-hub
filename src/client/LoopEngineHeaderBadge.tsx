@@ -18,7 +18,7 @@
  *
  * Styling is token-driven inline styles like the composer seat (the
  * client-module bundle is esbuild-built without a CSS loader).
- * @module dsh-agent-hub/client/header-badge
+ * @module dsh-omniloop/client/header-badge
  */
 
 import { useEffect, useState, type CSSProperties, type JSX } from 'react'

@@ -24,13 +24,13 @@
  * All functions here are pure string transforms — file I/O and durability live
  * in the plugin's apply.
  *
- * @module dsh-agent-hub/patch-manager
+ * @module dsh-omniloop/patch-manager
  */
 /**
  * Begin marker of the plugin-managed span inside a profile patch file.
  *
  * Deliberately still spelled `dsh-loop-engine` after the package was renamed to
- * `dsh-agent-hub`: this string is not a brand, it is the key by which the
+ * `dsh-omniloop`: this string is not a brand, it is the key by which the
  * plugin recognizes a block it already wrote into the *user's* file. Renaming
  * it would make every existing install fail to find its own span and append a
  * second one, leaving two `agent-loop: disabled` rows in the patch list.

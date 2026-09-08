@@ -1,7 +1,7 @@
 /**
  * Loop engine display copy (Chinese product copy; comments in English). Used by
  * the composer engine picker and the session-header engine badge.
- * @module dsh-agent-hub/client/locales
+ * @module dsh-omniloop/client/locales
  */
 /** Copy keys of the loop engine seats. */
 export interface LoopEngineKey {

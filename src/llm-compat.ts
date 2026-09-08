@@ -16,7 +16,7 @@
  * the two lines brand with different literals, so only the installed package's
  * own view of the type is assignable to the APIs we hand these values to.
  *
- * @module dsh-agent-hub/llm-compat
+ * @module dsh-omniloop/llm-compat
  */
 
 import * as llm from '@deepseek-ai/dsh-llm'
@@ -40,7 +40,7 @@ const callIdBrand = brand.ToolCallId ?? brand.CallId
 if (!callIdBrand) {
   throw new Error(
     '@deepseek-ai/dsh-llm exports neither ToolCallId nor CallId; ' +
-      'this dsh-llm version is not supported by dsh-agent-hub',
+      'this dsh-llm version is not supported by dsh-omniloop',
   )
 }
 /* v8 ignore stop */

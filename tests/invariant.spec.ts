@@ -47,7 +47,7 @@ describe('loop-engine invariant companion', () => {
       apply: applyInvariant,
     })
     await mounted
-    expect(registry.registered).toEqual(['dsh-agent-hub'])
+    expect(registry.registered).toEqual(['dsh-omniloop'])
 
     await mounted.dispose()
     await fiber.dispose()

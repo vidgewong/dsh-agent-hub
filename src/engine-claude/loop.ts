@@ -2,10 +2,10 @@
  * Claude Code loop engine module: hosts the AgentFactory that drives every
  * session through the official Claude Agent SDK, one stateless query per dsh
  * step, with the durable session log as the sole source of model context.
- * dsh-agent-hub constructs this factory when the Claude Code engine is
+ * dsh-omniloop constructs this factory when the Claude Code engine is
  * selected; this module is a library, not a Cordis plugin entry.
  *
- * @module dsh-agent-hub/engine-claude
+ * @module dsh-omniloop/engine-claude
  */
 
 import { Service } from '@deepseek-ai/cordis'

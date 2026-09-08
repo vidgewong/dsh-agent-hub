@@ -1,7 +1,7 @@
 /**
  * Public types of the Codex loop driver. Types only — no runtime code.
  *
- * @module dsh-agent-hub/engine-codex/types
+ * @module dsh-omniloop/engine-codex/types
  */
 /** Codex CLI sandbox modes, as spoken by the app-server `sandbox` field. */
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';

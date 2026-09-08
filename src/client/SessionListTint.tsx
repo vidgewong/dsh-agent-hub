@@ -33,7 +33,7 @@
  * shipped `.selected` and `:hover` rules (higher specificity) still override it —
  * so selecting a row looks exactly as it did before.
  *
- * @module dsh-agent-hub/client/session-list-tint
+ * @module dsh-omniloop/client/session-list-tint
  */
 
 import { useEffect, type JSX } from 'react'

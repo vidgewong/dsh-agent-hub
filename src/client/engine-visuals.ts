@@ -8,7 +8,7 @@
  * composer and the header badge import it without pulling either component into
  * the other's bundle graph.
  *
- * @module dsh-agent-hub/client/engine-visuals
+ * @module dsh-omniloop/client/engine-visuals
  */
 
 import type { LoopEngineId } from '../namespace.ts'
