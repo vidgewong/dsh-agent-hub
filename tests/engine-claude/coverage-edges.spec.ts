@@ -199,6 +199,57 @@ function streamingQuery(prompt: string | AsyncIterable<SDKUserMessage>): {
   }
 }
 
+/**
+ * A streaming-input double that mirrors the CLI's FOLDING behavior: a message
+ * pushed while the first turn is still being answered is absorbed into that
+ * turn, and the query emits only ONE `result` for the whole exchange (the
+ * behavior verified against the real claude CLI when a message is injected
+ * mid-subagent). This is the case the removed `liveInFlight` counter hung on —
+ * it expected a second result that never came.
+ *
+ * Crucially, the generator only ENDS once the driver closes the input stream —
+ * exactly as the real SDK query settles on stdin EOF. Under the old counting
+ * driver `close()` was never called after a folded injection, so this iterator
+ * (and the step's `for await`) would never complete and `whenIdle` would hang.
+ * Under the fix the first result closes the stream, the iterator completes, and
+ * the step settles.
+ */
+function foldingStreamingQuery(prompt: string | AsyncIterable<SDKUserMessage>): {
+  query: Query
+  release: () => void
+  entered: Promise<void>
+} {
+  let release: (() => void) | undefined
+  let markEntered: (() => void) | undefined
+  const entered = new Promise<void>((resolve) => { markEntered = resolve })
+  async function* inner(): AsyncGenerator<SDKMessage> {
+    if (typeof prompt === 'string') {
+      yield assistantText('first')
+      yield successResult()
+      return
+    }
+    const iterator = prompt[Symbol.asyncIterator]()
+    // Consume the seed (first) message, then park so the test can inject.
+    await iterator.next()
+    yield assistantText('first')
+    markEntered?.()
+    await new Promise<void>((resolve) => { release = resolve })
+    // Fold: a single result covers the seed and any mid-turn injection.
+    yield successResult()
+    // Then behave like the real query: keep reading input until the driver
+    // closes the stream (iterator done). The injected push is observed here —
+    // proving it was delivered, not dropped — and the loop only ends when the
+    // driver has closed the stream. The old driver never closed it after a
+    // fold, so this loop (and the step) would never terminate.
+    while (!(await iterator.next()).done) { /* drain until close() */ }
+  }
+  return {
+    entered,
+    release: () => { release?.() },
+    query: Object.assign(inner(), { close: vi.fn() }) as unknown as Query,
+  }
+}
+
 describe('commit vetoes', () => {
   it('reports a turn/start commit veto and preserves the inbox', async () => {
     const ctx = await harness()
@@ -375,6 +426,39 @@ describe('mid-turn input chaining', () => {
       // The injected reply rolls to its own step within the same turn.
       const steps = agent.session.snapshotEvents().filter(event => event.type === 'step/start')
       expect(steps.length).toBeGreaterThanOrEqual(2)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('settles when the CLI folds a mid-turn injection into one result', async () => {
+    // Regression: a message injected while Claude is mid-turn (e.g. during a
+    // subagent) is folded into the running turn and shares its single `result`.
+    // The old driver counted one result per pushed message, so it waited for a
+    // second result that never arrived — the query never closed and the whole
+    // turn hung until a manual stop. The step must instead settle on the first
+    // result and still record the injected user turn.
+    const ctx = await harness()
+    try {
+      let live: ReturnType<typeof foldingStreamingQuery> | undefined
+      queryMock.mockImplementation(({ prompt }) => (live = foldingStreamingQuery(prompt)).query)
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('fold-steer'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('one'))
+      await waitFor(() => live !== undefined)
+      await live!.entered
+      agent.steer(message('interrupt')) // folded into the live turn
+      live!.release()
+      // Must reach idle rather than hang; whenIdle would never resolve under
+      // the old counting driver.
+      await agent.whenIdle()
+      expect(queryMock).toHaveBeenCalledTimes(1)
+      const users = agent.session.snapshotEvents().filter(event => event.type === 'user/message')
+      expect(users.map(event => (event as never as { data: { content: Array<{ text: string }> } }).data.content[0]!.text))
+        .toEqual(['one', 'interrupt'])
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end' })
     } finally {
       await ctx.fiber.dispose()
     }
