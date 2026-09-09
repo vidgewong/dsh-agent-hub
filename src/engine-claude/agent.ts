@@ -254,6 +254,16 @@ interface AgentRegistryLike {
 }
 
 /**
+ * Records a subagent child session's engine, so the browser badge names the
+ * real engine instead of the default. Structural shape of the plugin's
+ * `loopEngineRecords` service; optional, so a profile without it (or without
+ * persistence) simply leaves the child unrecorded, exactly as before.
+ */
+interface EngineRecordsLike {
+  remember(meta: { readonly id: string; readonly cwd?: string }, engine: string): Promise<void>
+}
+
+/**
  * One SDK-driven subagent transcript materialised as a dsh child session. The
  * child session has `origin: 'subagent'` in its header and a
  * `subagent/descriptor` event, so `dsh-client-ui-subagent` discovers it through
@@ -378,6 +388,21 @@ class SubagentChildSession implements Agent {
     // Append the Task prompt as the child's first user message so the
     // user can see what the subagent was asked to do.
     this.seedPrompt(prompt)
+
+    // Record this child's engine so the browser badge names the real engine.
+    // A subagent session is created here, host-side, never through the router
+    // that records a top-level session's engine — so without this it carries no
+    // record and the badge resolves it to the default ("DeepSeek Loop"). The
+    // engine is `provider`, which is this driver's own id by construction. Best
+    // effort and fire-and-forget: a missing service (a profile without the
+    // record store) or a write failure must not fail the subagent, whose
+    // transcript is unaffected either way.
+    const engineRecords = loopCtx.get('loopEngineRecords') as EngineRecordsLike | undefined
+    if (engineRecords !== undefined) {
+      void engineRecords
+        .remember({ id: childId, ...parentHeader.cwd === undefined ? {} : { cwd: parentHeader.cwd } }, provider)
+        .catch(() => { /* a lost badge record is not worth failing the subagent */ })
+    }
   }
 
   get status(): AgentStatus {

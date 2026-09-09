@@ -49,6 +49,21 @@ export interface SessionMetaLike {
 }
 
 /**
+ * The narrow record-writing surface a router-bypassing engine driver borrows
+ * to record its own child (subagent) sessions.
+ *
+ * The plugin provides this as the `loopEngineRecords` service so a driver can
+ * record a session it created directly — a Task subagent, made host-side and
+ * never routed through the router — under the engine that is, by construction,
+ * running it. Without it those sessions carry no engine record and the browser
+ * badge resolves them to the default engine. Only `remember` is exposed: a
+ * driver records, it does not resolve or sweep.
+ */
+export interface LoopEngineRecordsService {
+  remember(meta: SessionMetaLike, engine: LoopEngineId): Promise<void>
+}
+
+/**
  * The persistence surface the record store borrows. Declared structurally so
  * this module needs no peer dependency on the persistence package, and so a
  * profile without persistence degrades to the shared fallback directory.

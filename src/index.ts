@@ -41,7 +41,7 @@ import {
   type LoopEngineSettings,
 } from './settings.ts'
 import { LoopEngineRouter, shadowSystemPrompt } from './router.ts'
-import { EngineRecordStore, type RecordPersistence } from './engine-record.ts'
+import { EngineRecordStore, type RecordPersistence, type LoopEngineRecordsService } from './engine-record.ts'
 import { installEngineRpc, type ConnectionLike } from './rpc.ts'
 import { CLAUDE_CODE_COMMANDS, discoverUserSlashCommands, type CommandDefinition } from './commands.ts'
 import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from './skills.ts'
@@ -336,6 +336,21 @@ export function apply(ctx: Context, config: Config): void {
   const records = new EngineRecordStore(
     () => ctx.get('sessionPersistence') as RecordPersistence | undefined,
   )
+
+  // Expose the record store to the engines behind the router. A top-level
+  // session gets its engine recorded by the router before `createAgent`
+  // delegates, but a Task subagent session is created directly by an engine
+  // driver (host-side, never through the router), so nothing recorded its
+  // engine and the browser badge resolved it to the default (in-process /
+  // "DeepSeek Loop"). The Claude driver reads this to record each subagent
+  // child as `claude-code` — the engine that is, by construction, running it —
+  // so the badge names the real engine. Provided as a plain optional service
+  // the driver reads with `loopCtx.get`, so a driver that does not use it (or a
+  // profile without persistence) is unaffected.
+  const engineRecordsService: LoopEngineRecordsService = {
+    remember: (meta, engine) => records.remember(meta, engine),
+  }
+  ctx.provide('loopEngineRecords', engineRecordsService)
 
   const router = new LoopEngineRouter({
     engineForNewSession: () => selected,

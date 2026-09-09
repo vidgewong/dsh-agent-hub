@@ -784,6 +784,112 @@ describe('ClaudeCodeAgent turn mapping', () => {
     }
   })
 
+  it('records each subagent child session under the claude-code engine', async () => {
+    // The browser badge names a session's engine from its durable record. A
+    // subagent session is created host-side, never through the router that
+    // records a top-level session's engine, so without an explicit record it
+    // resolves to the default engine and the badge shows the wrong kernel. The
+    // driver must record every child as `claude-code`.
+    const ctx = await harness()
+    const remembered: Array<{ id: string; engine: string }> = []
+    ctx.provide('loopEngineRecords', {
+      remember: (meta: { id: string }, engine: string) => {
+        remembered.push({ id: meta.id, engine })
+        return Promise.resolve()
+      },
+    })
+    try {
+      queryMock.mockImplementation(() => stream([
+        {
+          type: 'assistant',
+          parent_tool_use_id: null,
+          uuid: 'u-task',
+          session_id: 's-sub',
+          message: {
+            id: 'msg-task',
+            container: null,
+            context_management: null,
+            role: 'assistant',
+            type: 'message',
+            content: [{ type: 'tool_use', id: 'toolu_task', name: 'Task', input: { prompt: 'go' } }],
+            stop_reason: 'tool_use',
+            stop_sequence: null,
+            stop_details: null,
+            model: 'claude-sonnet-4-5',
+            usage: {
+              cache_creation: null,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+              inference_geo: null,
+              input_tokens: 1,
+              iterations: null,
+              output_tokens: 1,
+              server_tool_use: null,
+            },
+          },
+        } as unknown as SDKMessage,
+        {
+          type: 'system',
+          subtype: 'task_started',
+          task_id: 't-1',
+          tool_use_id: 'toolu_task',
+          description: 'do something',
+          prompt: 'go do it',
+          uuid: 'u-task-started',
+          session_id: 's-sub',
+        } as unknown as SDKMessage,
+        {
+          type: 'assistant',
+          parent_tool_use_id: 'toolu_task',
+          uuid: 'u-child',
+          session_id: 's-sub',
+          message: {
+            id: 'msg-child',
+            container: null,
+            context_management: null,
+            role: 'assistant',
+            type: 'message',
+            content: [{ type: 'text', text: 'child narration' }],
+            stop_reason: 'end_turn',
+            stop_sequence: null,
+            stop_details: null,
+            model: 'claude-sonnet-4-5',
+            usage: {
+              cache_creation: null,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+              inference_geo: null,
+              input_tokens: 1,
+              iterations: null,
+              output_tokens: 1,
+              server_tool_use: null,
+            },
+          },
+        } as unknown as SDKMessage,
+        successResult(),
+      ]))
+
+      const created: import('@deepseek-ai/dsh-session').Session[] = []
+      ctx.on('session/created', (session: import('@deepseek-ai/dsh-session').Session) => {
+        if (session.header.origin === 'subagent') created.push(session)
+      })
+
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('rec-parent'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'delegate' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      expect(created).toHaveLength(1)
+      const childId = created[0]!.id
+      // The child was recorded exactly once, under this driver's engine.
+      expect(remembered).toContainEqual({ id: childId, engine: 'claude-code' })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('expands subagent transcript into a separate child session with origin subagent', async () => {
     const ctx = await harness()
     try {
