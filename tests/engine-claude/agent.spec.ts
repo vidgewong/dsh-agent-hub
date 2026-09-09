@@ -971,6 +971,130 @@ describe('ClaudeCodeAgent turn mapping', () => {
     }
   })
 
+  it('keeps one child session across an interim result mid-turn', async () => {
+    // Regression: a `result` frame is one CLI-turn boundary, not the whole
+    // subagent tree. When the parent runs a Task subagent, the CLI settles a
+    // `result` (e.g. to answer a mid-turn injection) while the subagent is
+    // still streaming under the SAME `parent_tool_use_id`. The driver used to
+    // close + clear its child sessions on every result, so the still-running
+    // subagent flipped to a settled dot and its later frames re-created a fresh
+    // duplicate child under the same tool id — the "subagent finished, then an
+    // identical one restarts" bug. The child must survive the interim result:
+    // exactly one child session, carrying frames from both sides of it.
+    const ctx = await harness()
+    try {
+      const childAssistant = (id: string, text: string): SDKMessage => ({
+        type: 'assistant',
+        parent_tool_use_id: 'toolu_task',
+        uuid: `u-${id}`,
+        session_id: 's-sub',
+        message: {
+          id,
+          container: null,
+          context_management: null,
+          role: 'assistant',
+          type: 'message',
+          content: [{ type: 'text', text }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          stop_details: null,
+          model: 'claude-sonnet-4-5',
+          usage: {
+            cache_creation: null,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            inference_geo: null,
+            input_tokens: 1,
+            iterations: null,
+            output_tokens: 1,
+            server_tool_use: null,
+          },
+        },
+      } as unknown as SDKMessage)
+
+      queryMock.mockImplementation(() => stream([
+        // Parent launches a Task subagent.
+        {
+          type: 'assistant',
+          parent_tool_use_id: null,
+          uuid: 'u-task',
+          session_id: 's-sub',
+          message: {
+            id: 'msg-task',
+            container: null,
+            context_management: null,
+            role: 'assistant',
+            type: 'message',
+            content: [{ type: 'tool_use', id: 'toolu_task', name: 'Task', input: { prompt: 'go' } }],
+            stop_reason: 'tool_use',
+            stop_sequence: null,
+            stop_details: null,
+            model: 'claude-sonnet-4-5',
+            usage: {
+              cache_creation: null,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+              inference_geo: null,
+              input_tokens: 9,
+              iterations: null,
+              output_tokens: 4,
+              server_tool_use: null,
+            },
+          },
+        } as unknown as SDKMessage,
+        {
+          type: 'system',
+          subtype: 'task_started',
+          task_id: 't-1',
+          tool_use_id: 'toolu_task',
+          description: 'do something',
+          prompt: 'go do it',
+          uuid: 'u-task-started',
+          session_id: 's-sub',
+        } as unknown as SDKMessage,
+        // Subagent streams its first frame under toolu_task.
+        childAssistant('msg-child-1', 'child part one'),
+        // An interim result settles here (as a mid-turn injection would cause):
+        // the subagent is NOT done and keeps streaming under the same tool id.
+        successResult(),
+        // Subagent's later frame arrives after the interim result.
+        childAssistant('msg-child-2', 'child part two'),
+        // The final result ends the whole turn.
+        successResult(),
+      ]))
+
+      const created: import('@deepseek-ai/dsh-session').Session[] = []
+      ctx.on('session/created', (session: import('@deepseek-ai/dsh-session').Session) => {
+        if (session.header.origin === 'subagent') created.push(session)
+      })
+
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('interim-result'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'delegate' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      // Exactly ONE child session — the interim result did not tear it down and
+      // no duplicate was re-created for the same tool id.
+      expect(created).toHaveLength(1)
+      const child = created[0]!
+      const texts = child.snapshotEvents()
+        .filter(e => e.type === 'assistant/message')
+        .flatMap(e => (e.data as { message: { content: { type: string; text?: string }[] } }).message.content)
+        .filter(block => block.type === 'text')
+        .map(block => block.text)
+      // Both halves — before and after the interim result — landed in the SAME child.
+      expect(texts).toContain('child part one')
+      expect(texts).toContain('child part two')
+      // The child settled exactly once (closed in the query's finally, not on
+      // the interim result).
+      expect(child.snapshotEvents().filter(e => e.type === 'session/end-seed')).toHaveLength(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('gives an ambient skip_transcript task no child session', async () => {
     const ctx = await harness()
     try {
