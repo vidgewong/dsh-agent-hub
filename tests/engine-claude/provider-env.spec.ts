@@ -58,6 +58,45 @@ describe('deriveProviderEnv', () => {
     expect(derived?.diagnostic).toContain('https://litellm.example')
   })
 
+  it('pins every subagent model tier to the session model', async () => {
+    // A Task subagent is not routed by --model; the CLI derives its model from
+    // the tier defaults, falling back to built-in ids a private gateway does not
+    // serve. Pinning all tiers to the session model keeps subagents on the same
+    // endpoint-valid model as the parent.
+    const derived = await deriveProviderEnv(harness({ mb: anthropicRoute }), 'mb', 'claude-opus-4-6')
+    expect(derived?.env).toEqual({
+      ANTHROPIC_AUTH_TOKEN: 'sk-route',
+      ANTHROPIC_BASE_URL: 'https://litellm.example',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-6',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-opus-4-6',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-opus-4-6',
+      ANTHROPIC_SMALL_FAST_MODEL: 'claude-opus-4-6',
+    })
+    expect(derived?.diagnostic).toContain('subagent model claude-opus-4-6')
+  })
+
+  it('omits the model tiers when no model is resolved', async () => {
+    // Undefined and empty model both leave the CLI's own tier defaults intact.
+    for (const model of [undefined, '']) {
+      const derived = await deriveProviderEnv(harness({ mb: anthropicRoute }), 'mb', model)
+      expect(Object.keys(derived?.env ?? {})).toEqual(['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL'])
+      expect(derived?.diagnostic).not.toContain('subagent model')
+    }
+  })
+
+  it('lets a route childEnv override a pinned model tier', async () => {
+    // childEnv is layered last, so an operator can still redirect any tier.
+    const derived = await deriveProviderEnv(harness({
+      mb: { ...anthropicRoute, childEnv: { ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-fast' } },
+    }), 'mb', 'claude-opus-4-6')
+    expect(derived?.env).toMatchObject({
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-6',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-opus-4-6',
+      // childEnv wins for the tier it names.
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-fast',
+    })
+  })
+
   it('maps a bedrock route to a bearer token and a placeholder region', async () => {
     // The bearer is what switches the AWS client off SigV4, which a corporate
     // gateway does not implement; the region is required for the client to

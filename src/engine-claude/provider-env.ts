@@ -193,13 +193,27 @@ function mapRouteToEnv(
  * environment, and `backendDiagnostic` still reports when that leaves the child
  * with nothing.
  *
+ * When a `model` is given it is pinned as the child's default for every tier
+ * (`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL`).
+ * The parent turn is routed by the SDK's `--model`, but a Task subagent is NOT:
+ * the CLI derives the subagent's model from these tier defaults, falling back to
+ * its own built-in ids (e.g. `claude-sonnet-4-5`) when they are unset. Those
+ * built-in ids do not exist on a private gateway, so every subagent's first turn
+ * failed with "model … is not available" and the parent re-launched the whole
+ * batch on the working model — the "5 subagents became 10, the first 5 empty"
+ * behavior. Pinning all tiers to the session's actual model makes a subagent run
+ * on the same endpoint-valid model as its parent. A route's `childEnv` is layered
+ * last (in {@link mapRouteToEnv}), so an operator can still override any tier.
+ *
  * @param ctx - context to resolve `settings` and `credentials` through.
  * @param provider - route id from the resolved model selection.
+ * @param model - the session's resolved model id, pinned as every subagent tier default.
  * @returns the environment overlay and a diagnostic, or undefined.
  */
 export async function deriveProviderEnv(
   ctx: Context,
   provider: string | undefined,
+  model?: string,
 ): Promise<ProviderEnv | undefined> {
   if (provider === undefined) return undefined
   const profile = readProviderProfile(ctx, provider)
@@ -218,8 +232,22 @@ export async function deriveProviderEnv(
   }
   if (key === undefined || key === '') return undefined
 
-  const env = mapRouteToEnv(provider, profile, key)
-  if (env === undefined) return undefined
+  const routeEnv = mapRouteToEnv(provider, profile, key)
+  if (routeEnv === undefined) return undefined
+  // Pin every subagent model tier to the session's model. These sit UNDER
+  // routeEnv so a route's `childEnv` (already merged into routeEnv) still wins,
+  // and under nothing else the child would fall back to the CLI's built-in tier
+  // ids that a private gateway does not serve. Omitted when no model resolved,
+  // leaving the CLI's own defaults exactly as before.
+  const modelDefaults: Record<string, string> = model === undefined || model === ''
+    ? {}
+    : {
+      ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+      ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+      ANTHROPIC_SMALL_FAST_MODEL: model,
+    }
+  const env = { ...modelDefaults, ...routeEnv }
   // Names only. This line is appended to the session log, and a route's
   // `childEnv` is operator-supplied — it may hold a token as readily as a TLS
   // switch, and the log is not the place to find out which.
@@ -229,6 +257,7 @@ export async function deriveProviderEnv(
     diagnostic: `claude-code: routing to dsh provider "${provider}"`
       + `${profile.baseURL === undefined ? '' : ` at ${profile.baseURL}`}`
       + ` (credential ${ref})`
+      + `${model === undefined || model === '' ? '' : `; subagent model ${model}`}`
       + `${extra.length === 0 ? '' : `; route env ${extra.join(', ')}`}`,
   }
 }

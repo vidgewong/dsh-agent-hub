@@ -1141,7 +1141,7 @@ export class ClaudeCodeAgent implements Agent {
       // backend that would out-rank it; the deployment's `env` still layers on
       // top. When the route cannot be derived this is undefined and the child
       // environment is re-inherited exactly as before.
-      const derived = await deriveProviderEnv(this.loopCtx, selected.provider)
+      const derived = await deriveProviderEnv(this.loopCtx, selected.provider, selected.model)
       if (derived !== undefined) diagnostics.push(derived.diagnostic)
       const options = claudeQueryOptions({
         cwd,
