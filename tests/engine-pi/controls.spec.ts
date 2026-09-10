@@ -10,13 +10,14 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry, { assembleContextFor } from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { PiLoop, PI_SANDBOX_MODES } from '../../src/engine-pi/loop.ts'
 import type { PiMessage } from '../../src/engine-pi/rpc/types.ts'
 
 /** Local plugin wrapper: mount constructs the Pi loop factory (the engine module is a library, not a Cordis plugin). */
 const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt', 'subprocess'],
+  inject: ['agents', 'sessions', 'systemPrompt', 'subprocess', 'sessionProjections'],
   apply: (ctx: Context, config: Record<string, unknown>): void => {
     void new PiLoop(ctx, config as Parameters<typeof PiLoop>[1])
   },
@@ -82,6 +83,7 @@ async function harness(withLoop = true): Promise<Context> {
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(LocalSubprocessRuntime)
   if (withLoop) await ctx.plugin(loopPlugin, {})
   return ctx

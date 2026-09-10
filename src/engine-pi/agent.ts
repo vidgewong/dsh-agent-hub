@@ -21,11 +21,12 @@ import type {
   InboxTarget,
   PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
-import { Inbox, agentEvents } from '@deepseek-ai/dsh-agent'
+import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import { CallId } from '../llm-compat.ts'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { AssistantStreamRecord } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
@@ -48,6 +49,8 @@ import {
   type SkillDefinition,
   type SkillsService,
 } from '../driver-core/skill-inject.ts'
+import { PluginInbox } from '../driver-core/inbox.ts'
+import { PluginAssistantStream } from '../driver-core/assistant-stream.ts'
 
 /** Provider route label used for logged header snapshots and message provenance. */
 const PROVIDER = 'pi'
@@ -92,13 +95,15 @@ type PreparedStep =
 /** An assistant message held until the step knows whether turn usage attaches to it. */
 interface HeldMessage {
   readonly content: ContentBlock[]
-  /** Durable seqs of the chunks that already streamed this message's live partial. */
-  readonly refs: SessionSeq[]
+  /** Compact records of the chunks that streamed this message's live partial. */
+  readonly stream: AssistantStreamRecord[]
+  /** Live attempt to settle after the durable append commits, when one streamed. */
+  readonly attempt: PluginAssistantStream | undefined
 }
 
 /** Drives one session through turn and step boundaries on Pi. */
 export class PiAgent implements Agent {
-  readonly inbox: Inbox
+  readonly inbox: PluginInbox
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
 
@@ -111,6 +116,11 @@ export class PiAgent implements Agent {
 
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
+
+  /** Attached-session-local attempt counter for embedded assistant streams. */
+  private assistantAttemptCounter = 0
+  /** Monotone revision for live assistant-stream frames within this lifecycle. */
+  private assistantStreamRevision = 0
 
   /** Lazily created RPC client, reused across steps and released on scope teardown. */
   private rpc: PiRpcClient | undefined
@@ -127,15 +137,12 @@ export class PiAgent implements Agent {
     private readonly bin: string,
   ) {
     this.dispatch = agentEvents(loopCtx, this)
-    this.inbox = new Inbox(session, {
-      inserted: (message) => { this.dispatch.emit('agent/inbox/inserted', { message }) },
-      discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
-      claimed: (message, turn) => { this.dispatch.emit('agent/inbox/claimed', { message, turn }) },
-    })
     const lastTurn = session.snapshotEvents().findLast(event => event.type === 'turn/start')?.data.turn ?? 0
     this.phase = { kind: 'idle', lastTurn }
     this.scope = createScope(loopCtx, this)
-    this.ctx = this.scope.ctx.extend({ agent: this })
+    this.ctx = this.scope.ctx
+    this.inbox = new PluginInbox(this.ctx.sessionProjections, session, this.dispatch)
+    this.scope.ctx.effect(() => () => this.inbox.release(), 'pi.inbox()')
     // Release the shared RPC client when the agent scope is unwound.
     this.scope.ctx.effect(() => () => {
       this.rpc?.dispose()
@@ -557,8 +564,10 @@ export class PiAgent implements Agent {
        * reply has already streamed.
        */
       let settled = false
-      /** Seq refs of chunks already streamed for the current agent message. */
-      const chunkSeqs: SessionSeq[] = []
+      /** Live embedded assistant stream for the current agent message, when streaming. */
+      let assistantStream: PluginAssistantStream | undefined
+      /** Whether the current stream has emitted its opening frame. */
+      let assistantStreamStarted = false
       /** The assistant message being assembled; its chunks stream live as items complete. */
       let held: HeldMessage | undefined
       /** Text blocks already block-start-ed, by message content index. */
@@ -574,30 +583,45 @@ export class PiAgent implements Agent {
       /** Whether an assistant message already flushed for this turn (message_end). */
       let assistantFlushed = false
 
-      /** Emit one live partial chunk and return its durable seq. */
-      const emitChunk = (chunk: StreamChunk): number => {
-        const seq = this.session.append('assistant/chunk', { turn, step, chunk }).seq
-        chunkSeqs.push(seq)
-        return seq
+      /** Mint a fresh embedded assistant stream for the next agent message. */
+      const newAssistantStream = (): PluginAssistantStream => {
+        assistantStreamStarted = false
+        return new PluginAssistantStream(
+          this.id, ++this.assistantAttemptCounter,
+          () => ++this.assistantStreamRevision, turn, step, this.dispatch,
+        )
+      }
+
+      /** Emit one live partial chunk into the current attempt. */
+      const emitChunk = (chunk: StreamChunk): void => {
+        assistantStream ??= newAssistantStream()
+        if (!assistantStreamStarted) { assistantStream.start(); assistantStreamStarted = true }
+        assistantStream.push(chunk)
       }
 
       /** Append the held assistant message, optionally carrying turn usage. */
       const flushHeld = (usage?: TokenUsage): void => {
         if (held === undefined) return
-        this.session.append('assistant/message', {
+        const message = held
+        const append = (): SessionSeq => this.session.append('assistant/message', {
           turn,
           step,
           message: createAssistantMessage({
-            content: held.content,
+            content: message.content,
             source: { provider: PROVIDER, model: this.modelLabel() },
           }),
+          stream: message.stream,
           ...usage === undefined ? {} : { usage },
         }, {
           surfaceOp: 'append',
-          // Link the durable message to the chunks that streamed it, so replay
-          // can reconstruct the partial exactly as shown.
-          sourceEventSeqs: held.refs,
-        })
+        }).seq
+        // Publish the terminal stream frame only after the durable message
+        // commits; abandon the live attempt if the append throws.
+        if (message.attempt !== undefined && !message.attempt.ended) {
+          message.attempt.settle('assistant/message', append)
+        } else {
+          append()
+        }
         held = undefined
       }
 
@@ -669,7 +693,7 @@ export class PiAgent implements Agent {
             break
           case 'message_start':
             if (event.message.role === 'assistant') {
-              chunkSeqs.length = 0
+              assistantStream = newAssistantStream()
               startedText.clear()
               startedReasoning.clear()
               thinkingByIndex.clear()
@@ -708,8 +732,12 @@ export class PiAgent implements Agent {
             if (event.message.role === 'assistant') {
               if (event.message.usage !== undefined) lastUsage = mapUsage(event.message.usage)
               flushHeld()
-              held = { content: contentOf(event.message), refs: [...chunkSeqs] }
-              chunkSeqs.length = 0
+              held = {
+                content: contentOf(event.message),
+                stream: assistantStream?.stream ?? [],
+                attempt: assistantStreamStarted ? assistantStream : undefined,
+              }
+              assistantStream = undefined
               flushHeld(lastUsage)
               assistantFlushed = true
             }
@@ -731,8 +759,12 @@ export class PiAgent implements Agent {
           case 'turn_end': {
             if (!assistantFlushed && event.message !== undefined) {
               if (event.message.usage !== undefined) lastUsage = mapUsage(event.message.usage)
-              held = { content: contentOf(event.message), refs: [...chunkSeqs] }
-              chunkSeqs.length = 0
+              held = {
+                content: contentOf(event.message),
+                stream: assistantStream?.stream ?? [],
+                attempt: assistantStreamStarted ? assistantStream : undefined,
+              }
+              assistantStream = undefined
             }
             for (const toolResult of event.toolResults ?? []) {
               this.appendToolResult(turn, step, toolResult)

@@ -92,5 +92,11 @@ export declare class PiLoop extends Service implements AgentFactory {
     resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle>;
     /** Resume through an explicit persistence handle. */
     private resumeWith;
+    /**
+     * Persist any events the reconstructed session accumulated beyond the stored
+     * prefix (interrupted-turn closers, setup-time appends) before publication,
+     * so the durable log matches the live session at start.
+     */
+    private appendUnstoredSuffix;
 }
 //# sourceMappingURL=loop.d.ts.map

@@ -22,7 +22,7 @@ import type {
   InboxTarget,
   PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
-import { Inbox, agentEvents } from '@deepseek-ai/dsh-agent'
+import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
@@ -30,7 +30,9 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
-import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { StreamChunk, AssistantStreamRecord } from '@deepseek-ai/dsh-llm'
+import { PluginInbox } from '../driver-core/inbox.ts'
+import { PluginAssistantStream } from '../driver-core/assistant-stream.ts'
 import type { ResolvedConfig } from './types.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
 import { resolveSessionPermission, type CodexPermission } from './permission.ts'
@@ -75,13 +77,15 @@ type PreparedStep =
 /** An assistant message held until the step knows whether turn usage attaches to it. */
 interface HeldMessage {
   readonly content: ContentBlock[]
-  /** Durable seqs of the chunks that already streamed this message's live partial. */
-  readonly refs: SessionSeq[]
+  /** Compact embedded stream of the chunks that streamed this message's live partial. */
+  readonly stream: AssistantStreamRecord[]
+  /** The live streaming attempt to settle when this message commits. */
+  readonly attempt: PluginAssistantStream | undefined
 }
 
 /** Drives one session through turn and step boundaries on Codex. */
 export class CodexAgent implements Agent {
-  readonly inbox: Inbox
+  readonly inbox: PluginInbox
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
 
@@ -95,6 +99,11 @@ export class CodexAgent implements Agent {
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
 
+  /** Attached-session-local attempt counter for embedded assistant streams. */
+  private assistantAttemptCounter = 0
+  /** Monotone revision for live assistant-stream frames within this lifecycle. */
+  private assistantStreamRevision = 0
+
   /** Lazily created app-server client, reused across steps and released on scope teardown. */
   private appServer: AppServerClient | undefined
 
@@ -106,15 +115,12 @@ export class CodexAgent implements Agent {
     private readonly config: ResolvedConfig,
   ) {
     this.dispatch = agentEvents(loopCtx, this)
-    this.inbox = new Inbox(session, {
-      inserted: (message) => { this.dispatch.emit('agent/inbox/inserted', { message }) },
-      discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
-      claimed: (message, turn) => { this.dispatch.emit('agent/inbox/claimed', { message, turn }) },
-    })
     const lastTurn = session.snapshotEvents().findLast(event => event.type === 'turn/start')?.data.turn ?? 0
     this.phase = { kind: 'idle', lastTurn }
     this.scope = createScope(loopCtx, this)
-    this.ctx = this.scope.ctx.extend({ agent: this })
+    this.ctx = this.scope.ctx
+    this.inbox = new PluginInbox(this.ctx.sessionProjections, session, this.dispatch)
+    this.scope.ctx.effect(() => () => this.inbox.release(), 'codex.inbox()')
     // Release the shared app-server client when the agent scope is unwound.
     this.scope.ctx.effect(() => () => {
       this.appServer?.dispose()
@@ -127,6 +133,14 @@ export class CodexAgent implements Agent {
     if (this.appServer !== undefined && !this.appServer.closed) return this.appServer
     this.appServer = await AppServerClient.create()
     return this.appServer
+  }
+
+  /** Mint a fresh embedded assistant stream attempt for one durable message. */
+  private newAssistantStream(turn: number, step: number): PluginAssistantStream {
+    return new PluginAssistantStream(
+      this.id, ++this.assistantAttemptCounter,
+      () => ++this.assistantStreamRevision, turn, step, this.dispatch,
+    )
   }
 
   get status(): AgentStatus {
@@ -494,10 +508,6 @@ export class CodexAgent implements Agent {
         let finished = false
         /** Reasoning texts accumulated since the last flush, folded into the next agent message or flushed as a trailing reasoning message. */
         const pendingReasoning: string[] = []
-        /** Seq refs of reasoning chunks already streamed for {@link pendingReasoning}. */
-        const pendingReasoningSeqs: SessionSeq[] = []
-        /** Seq refs of text chunks already streamed for the current agent message. */
-        const textSeqs: SessionSeq[] = []
         /** The assistant message being assembled; its chunks stream live as items complete. */
         let held: HeldMessage | undefined
         /** Whether a reasoning block has been started (block-start emitted). */
@@ -507,39 +517,66 @@ export class CodexAgent implements Agent {
         /** Block index for the current text block. */
         let textBlockIndex = 0
 
-        /** Emit one live partial chunk and return its durable seq. */
-        const emitChunk = (chunk: StreamChunk): SessionSeq =>
-          this.session.append('assistant/chunk', { turn, step, chunk }).seq
+        /**
+         * Live embedded assistant stream for the message currently accumulating.
+         * Created lazily on the first streamed chunk and reset once its durable
+         * message is held; its compact records embed in the settling event and
+         * its transient frames drive the live partial.
+         */
+        let attempt: PluginAssistantStream | undefined
+        /** Whether the current attempt has emitted its opening frame. */
+        let attemptStarted = false
+
+        /** Emit one live partial chunk into the current attempt. */
+        const emitChunk = (chunk: StreamChunk): void => {
+          attempt ??= this.newAssistantStream(turn, step)
+          if (!attemptStarted) { attempt.start(); attemptStarted = true }
+          attempt.push(chunk)
+        }
 
         /** Append the held assistant message, optionally carrying the turn's usage. */
         const flushHeld = (usage?: TokenUsage): void => {
           if (held === undefined) return
-          this.session.append('assistant/message', {
+          const message = held
+          const append = (): SessionSeq => this.session.append('assistant/message', {
             turn,
             step,
             message: createAssistantMessage({
-              content: held.content,
+              content: message.content,
               source: { provider: PROVIDER, model: this.modelLabel() },
             }),
+            stream: message.stream,
             ...usage === undefined ? {} : { usage },
           }, {
             surfaceOp: 'append',
-            // Link the durable message to the chunks that streamed it, so replay
-            // can reconstruct the partial exactly as shown.
-            sourceEventSeqs: held.refs,
-          })
+          }).seq
+          // Publish the terminal stream frame only after the durable message
+          // commits; append() alone when no chunk ever streamed the message.
+          if (message.attempt !== undefined && !message.attempt.ended) {
+            message.attempt.settle('assistant/message', append)
+          } else {
+            append()
+          }
           held = undefined
+        }
+        /** Capture and reset the live attempt for the message about to be held. */
+        const captureAttempt = (): { stream: AssistantStreamRecord[]; attempt: PluginAssistantStream | undefined } => {
+          const captured = { stream: attempt?.stream ?? [], attempt }
+          attempt = undefined
+          attemptStarted = false
+          return captured
         }
         /** Flush accumulated reasoning as its own durable message; an agent message folds it instead. */
         const flushReasoning = (usage?: TokenUsage): void => {
           if (pendingReasoning.length === 0) return
           flushHeld()
+          const captured = captureAttempt()
           held = {
             content: pendingReasoning.map(text => ({ type: 'reasoning' as const, text })),
-            refs: [...pendingReasoningSeqs],
+            stream: captured.stream,
+            attempt: captured.attempt,
           }
           pendingReasoning.length = 0
-          pendingReasoningSeqs.length = 0
           flushHeld(usage)
         }
 
@@ -561,9 +598,9 @@ export class CodexAgent implements Agent {
               // Token-level streaming of the agent's reply — live.
               if (!textBlockStarted) {
                 textBlockStarted = true
-                textSeqs.push(emitChunk({ type: 'block-start', index: textBlockIndex, blockType: 'text' }))
+                emitChunk({ type: 'block-start', index: textBlockIndex, blockType: 'text' })
               }
-              textSeqs.push(emitChunk({ type: 'text-delta', index: textBlockIndex, text: event.delta }))
+              emitChunk({ type: 'text-delta', index: textBlockIndex, text: event.delta })
               break
             }
             case 'reasoning-summary-delta':
@@ -573,9 +610,9 @@ export class CodexAgent implements Agent {
               const index = pendingReasoning.length
               if (!reasoningBlockStarted) {
                 reasoningBlockStarted = true
-                pendingReasoningSeqs.push(emitChunk({ type: 'block-start', index, blockType: 'reasoning' }))
+                emitChunk({ type: 'block-start', index, blockType: 'reasoning' })
               }
-              pendingReasoningSeqs.push(emitChunk({ type: 'reasoning-delta', index, text: event.delta }))
+              emitChunk({ type: 'reasoning-delta', index, text: event.delta })
               break
             }
             case 'item-completed': {
@@ -590,16 +627,16 @@ export class CodexAgent implements Agent {
               } else if (item.type === 'agentMessage') {
                 // Agent message completed — fold reasoning + text into one message.
                 flushHeld()
+                const captured = captureAttempt()
                 held = {
                   content: [
                     ...pendingReasoning.map(text => ({ type: 'reasoning' as const, text })),
                     { type: 'text' as const, text: item.text ?? '' },
                   ],
-                  refs: [...pendingReasoningSeqs, ...textSeqs],
+                  stream: captured.stream,
+                  attempt: captured.attempt,
                 }
                 pendingReasoning.length = 0
-                pendingReasoningSeqs.length = 0
-                textSeqs.length = 0
                 reasoningBlockStarted = false
                 textBlockStarted = false
               } else if (item.type === 'commandExecution') {

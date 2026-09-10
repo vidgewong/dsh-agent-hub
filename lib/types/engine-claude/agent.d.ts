@@ -10,11 +10,11 @@
  * @module dsh-omniloop/engine-claude/agent
  */
 import type { Agent, AgentCancelCause, AgentOptions, AgentStatus, CancelOptions, InboxTarget } from '@deepseek-ai/dsh-agent';
-import { Inbox } from '@deepseek-ai/dsh-agent';
 import type { Scope } from '@deepseek-ai/dsh-scope';
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
+import { PluginInbox } from '../driver-core/inbox.ts';
 import type { ResolvedConfig } from './types.ts';
 /** Drives one session through turn and step boundaries on Claude Code. */
 export declare class ClaudeCodeAgent implements Agent {
@@ -23,7 +23,7 @@ export declare class ClaudeCodeAgent implements Agent {
     readonly options: AgentOptions;
     readonly session: Session;
     private readonly config;
-    readonly inbox: Inbox;
+    readonly inbox: PluginInbox;
     private phase;
     private activityDone;
     /** The agent-scoped registration boundary; the lifecycle owner unwinds it after the driver exits. */
@@ -33,6 +33,10 @@ export declare class ClaudeCodeAgent implements Agent {
     private readonly dispatch;
     /** Whether this loop instance has appended its initial/resume request anchor. */
     private requestHeaderLogged;
+    /** Attached-session-local attempt counter for embedded assistant streams. */
+    private assistantAttemptCounter;
+    /** Monotone revision for live assistant-stream frames within this lifecycle. */
+    private assistantStreamRevision;
     /**
      * Live injection sink for the step currently streaming a Claude query.
      *

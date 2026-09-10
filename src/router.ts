@@ -260,9 +260,9 @@ export class LoopEngineRouter implements AgentFactory {
   private withSetup(engine: LoopEngineId, setup: AgentSetup | undefined): AgentSetup | undefined {
     const decorate = this.options.decorateSetup
     if (decorate === undefined) return setup
-    return (agentCtx) => {
+    return (agentCtx, agent) => {
       decorate(engine, agentCtx)
-      return setup?.(agentCtx)
+      return setup?.(agentCtx, agent)
     }
   }
 

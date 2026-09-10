@@ -15,12 +15,13 @@ import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { ClaudeCodeLoop } from '../../src/engine-claude/loop.ts'
 /** Local plugin wrapper: mount constructs the Claude Code loop factory (the engine module is a library, not a Cordis plugin). */
 const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt', 'subprocess'],
+  inject: ['agents', 'sessions', 'systemPrompt', 'subprocess', 'sessionProjections'],
   apply: (ctx: Context, config: Record<string, unknown>): void => {
     void new ClaudeCodeLoop(ctx, config as Parameters<typeof ClaudeCodeLoop>[1])
   },
@@ -164,6 +165,7 @@ async function harness(): Promise<Context> {
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(LocalSubprocessRuntime)
   await ctx.plugin(loopPlugin, {})
   return ctx
@@ -1443,6 +1445,7 @@ describe('configuration validation', () => {
     await fresh.plugin(SessionStore)
     await fresh.plugin(SystemPrompt, { persona: 'You are the deployment.' })
     await fresh.plugin(AgentRegistry)
+    await fresh.plugin(SessionProjectionRegistry)
     await fresh.plugin(LocalSubprocessRuntime)
     return fresh
   }

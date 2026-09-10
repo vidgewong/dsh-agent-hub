@@ -15,6 +15,7 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry, { type AgentFactory } from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 
@@ -100,6 +101,7 @@ async function boot(doc?: Record<string, unknown>) {
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(LocalSubprocessRuntime)
   const fiber = ctx.plugin(MemorySettings, doc)
   await fiber
@@ -751,6 +753,25 @@ describe('mountBaseLoop', () => {
 
     vi.doUnmock('@deepseek-ai/dsh-agent-loop')
     vi.resetModules()
+  })
+
+  it('skips the mount when its generation went inactive before the import resolved', async () => {
+    const ctx = new Context()
+    // A stale generation: the inject-scope fiber unloaded (its providers
+    // reprovisioned) while the dynamic import was in flight. `assertActive`
+    // throws for such a fiber, and the mount must be skipped so the base loop
+    // never lands on a context whose parent no longer holds `tools`/`llm`.
+    const loopCtx = {
+      fiber: { assertActive: () => { throw new Error('cannot create effect on inactive context') } },
+      plugin: vi.fn(() => Promise.resolve({}) as never),
+    } as unknown as Context
+
+    const mount = vi.fn()
+    mountBaseLoop(ctx, loopCtx, mount)
+    // Give the dynamic import a chance to resolve, then confirm nothing mounted.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(mount).not.toHaveBeenCalled()
+    expect((loopCtx.plugin as unknown as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled()
   })
 })
 

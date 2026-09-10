@@ -11,12 +11,12 @@
  * @module dsh-omniloop/engine-pi/agent
  */
 import type { Agent, AgentCancelCause, AgentOptions, AgentStatus, CancelOptions, InboxTarget } from '@deepseek-ai/dsh-agent';
-import { Inbox } from '@deepseek-ai/dsh-agent';
 import type { Scope } from '@deepseek-ai/dsh-scope';
 import type { Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ResolvedConfig } from './types.ts';
 import { type PiSpawnCapability } from './rpc/client.ts';
+import { PluginInbox } from '../driver-core/inbox.ts';
 /** Drives one session through turn and step boundaries on Pi. */
 export declare class PiAgent implements Agent {
     private loopCtx;
@@ -26,7 +26,7 @@ export declare class PiAgent implements Agent {
     private readonly config;
     private readonly spawn;
     private readonly bin;
-    readonly inbox: Inbox;
+    readonly inbox: PluginInbox;
     private phase;
     private activityDone;
     /** The agent-scoped registration boundary; the lifecycle owner unwinds it after the driver exits. */
@@ -36,6 +36,10 @@ export declare class PiAgent implements Agent {
     private readonly dispatch;
     /** Whether this loop instance has appended its initial/resume request anchor. */
     private requestHeaderLogged;
+    /** Attached-session-local attempt counter for embedded assistant streams. */
+    private assistantAttemptCounter;
+    /** Monotone revision for live assistant-stream frames within this lifecycle. */
+    private assistantStreamRevision;
     /** Lazily created RPC client, reused across steps and released on scope teardown. */
     private rpc;
     /** The spawn spec the cached client was built from; a change forces a respawn. */

@@ -12,13 +12,14 @@ import { Context, symbols, type EffectMeta, type Fiber } from '@deepseek-ai/cord
 import SessionStore, { SessionId, type SessionEvent, type SessionPreparation } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry, { type AgentHandle } from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { CodexLoop } from '../../src/engine-codex/loop.ts'
 import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
 
 /** Local plugin wrapper: mount constructs the Codex loop factory (the engine module is a library, not a Cordis plugin). */
 const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt'],
+  inject: ['agents', 'sessions', 'systemPrompt', 'sessionProjections'],
   apply: (ctx: Context, config: Record<string, unknown>): void => {
     void new CodexLoop(ctx, config as Parameters<typeof CodexLoop>[1])
   },
@@ -81,6 +82,7 @@ async function harness(): Promise<Context> {
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(loopPlugin, {})
   return ctx
 }
@@ -104,6 +106,7 @@ describe('factory registration and HMR-safe disposal', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionProjectionRegistry)
     const loopFiber = await ctx.plugin(loopPlugin, {})
     try {
       mock.runStreamed.mockImplementation(() => okStream())
@@ -264,6 +267,7 @@ describe('createAgent options', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionProjectionRegistry)
     try {
       const loopFiber = await ctx.plugin(loopPlugin, {})
       const gate = Promise.withResolvers<undefined>()
@@ -306,6 +310,7 @@ describe('resume', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(loopPlugin, {})
     await ctx.plugin(JsonlSessionPersistence, { root })
     return ctx
@@ -313,13 +318,18 @@ describe('resume', () => {
 
   async function seedSession(root: string, sessionId: SessionId): Promise<void> {
     const ctx = await persistentHarness(root)
-    const seed: SessionEvent[] = [
-      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
-      { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
-    ]
-    const session = ctx.sessions.create(sessionId, { seed })
-    await ctx.sessions.flush(session)
-    await ctx.fiber.dispose()
+    try {
+      const persistence = ctx.get('sessionPersistence')!
+      const header = { version: 3 as const, id: sessionId, createdAt: Date.now(), isSeeded: false, cwd: process.cwd() }
+      const handle = await persistence.create(header)
+      await handle.append([
+        { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } } as SessionEvent,
+        { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } } as SessionEvent,
+      ])
+      await handle.close()
+    } finally {
+      await ctx.fiber.dispose()
+    }
   }
 
   it('fails loudly when no persistence backend is configured', async () => {
@@ -388,10 +398,10 @@ describe('resume', () => {
       await seedSession(root, sessionId)
       const ctx = await persistentHarness(root)
       try {
-        const gate = Promise.withResolvers<SessionPreparation>()
+        const gate = Promise.withResolvers<{ close: () => Promise<void> }>()
         const started = Promise.withResolvers<undefined>()
-        const released = vi.fn()
-        ctx.sessionPersistence.prepare = () => {
+        const closed = vi.fn()
+        ;(ctx.sessionPersistence as unknown as { open: (...args: unknown[]) => unknown }).open = () => {
           started.resolve(undefined)
           return gate.promise
         }
@@ -402,10 +412,10 @@ describe('resume', () => {
         })
         await started.promise
         controller.abort(new Error('cancel load'))
-        gate.resolve({ session: null, [Symbol.dispose]: released } as unknown as SessionPreparation)
+        gate.resolve({ close: async () => { closed() } } as unknown as { close: () => Promise<void> })
         await expect(resuming).rejects.toThrow('cancel load')
         await new Promise<void>((resolve) => { setImmediate(resolve) })
-        expect(released).toHaveBeenCalledTimes(1)
+        expect(closed).toHaveBeenCalledTimes(1)
         expect(ctx.agents.get(sessionId)).toBeUndefined()
       } finally {
         await ctx.fiber.dispose()
@@ -445,10 +455,10 @@ describe('resume', () => {
       await seedSession(root, sessionId)
       const ctx = await persistentHarness(root)
       try {
-        ctx.sessionPersistence.prepare = () => Promise.reject(new Error('prepare boom'))
+        ;(ctx.sessionPersistence as unknown as { open: (...args: unknown[]) => unknown }).open = () => Promise.reject(new Error('open boom'))
         await expect(ctx.agents.resume({
           resumeSessionId: sessionId,
-        })).rejects.toThrow('prepare boom')
+        })).rejects.toThrow('open boom')
         expect(ctx.agents.get(sessionId)).toBeUndefined()
       } finally {
         await ctx.fiber.dispose()
@@ -465,10 +475,9 @@ describe('resume', () => {
       await seedSession(root, sessionId)
       const ctx = await persistentHarness(root)
       try {
-        const gate = Promise.withResolvers<SessionPreparation>()
+        const gate = Promise.withResolvers<unknown>()
         const started = Promise.withResolvers<undefined>()
-        const released = vi.fn()
-        ctx.sessionPersistence.prepare = () => {
+        ;(ctx.sessionPersistence as unknown as { open: (...args: unknown[]) => unknown }).open = () => {
           started.resolve(undefined)
           return gate.promise
         }
@@ -482,7 +491,6 @@ describe('resume', () => {
         gate.reject(new Error('late failure'))
         await expect(resuming).rejects.toThrow('cancel load')
         await new Promise<void>((resolve) => { setImmediate(resolve) })
-        expect(released).not.toHaveBeenCalled()
         expect(ctx.agents.get(sessionId)).toBeUndefined()
       } finally {
         await ctx.fiber.dispose()

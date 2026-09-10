@@ -10,12 +10,13 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry, { assembleContextFor } from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES } from '../../src/engine-codex/loop.ts'
 import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
 
 /** Local plugin wrapper: mount constructs the Codex loop factory (the engine module is a library, not a Cordis plugin). */
 const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt'],
+  inject: ['agents', 'sessions', 'systemPrompt', 'sessionProjections'],
   apply: (ctx: Context, config: Record<string, unknown>): void => {
     void new CodexLoop(ctx, config as Parameters<typeof CodexLoop>[1])
   },
@@ -89,6 +90,7 @@ async function harness(withLoop = true): Promise<Context> {
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SessionProjectionRegistry)
   if (withLoop) await ctx.plugin(loopPlugin, {})
   return ctx
 }

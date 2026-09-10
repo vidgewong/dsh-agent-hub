@@ -20,7 +20,7 @@ import type {
   InboxTarget,
   PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
-import { Inbox, agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
+import { agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, LlmCallConfig, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
@@ -28,6 +28,8 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { SessionId, canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
+import { PluginInbox } from '../driver-core/inbox.ts'
+import { PluginAssistantStream } from '../driver-core/assistant-stream.ts'
 import { randomUUID } from 'node:crypto'
 import type { SDKResultError, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { ResolvedConfig } from './types.ts'
@@ -286,7 +288,7 @@ class SubagentChildSession implements Agent {
   readonly session: Session
   readonly id: SessionId
   readonly options: AgentOptions
-  readonly inbox: Inbox
+  readonly inbox: PluginInbox
   readonly scope: Scope
   readonly ctx: Context
   /** Detach the child session from the live store so it shows as inactive. */
@@ -316,7 +318,14 @@ class SubagentChildSession implements Agent {
   /** Accumulated reasoning per rebased block index. */
   reasoningByIndex = new Map<number, string>()
   /** Chunk seqs for source linking. */
-  chunkSeqs: SessionSeq[] = []
+  /** Live embedded assistant stream for the child's current step. */
+  assistantStream: PluginAssistantStream
+  /** Whether the child's current stream has emitted its opening frame. */
+  assistantStreamStarted = false
+  /** Attempt counter local to this child session's lifecycle. */
+  private assistantAttemptCounter = 0
+  /** Monotone revision for this child's live assistant-stream frames. */
+  private assistantStreamRevision = 0
   /** Call ids published by the child, for result pairing. */
   ownCallIds = new Set<string>()
   /** Block-index rebase state. */
@@ -349,13 +358,11 @@ class SubagentChildSession implements Agent {
       },
     })
     this.dispatch = agentEvents(loopCtx, this)
-    this.inbox = new Inbox(this.session, {
-      inserted: () => undefined,
-      discarded: () => undefined,
-      claimed: () => undefined,
-    })
+    this.assistantStream = this.newAssistantStream(this.turn, this.step)
     this.scope = createScope(loopCtx, this)
-    this.ctx = this.scope.ctx.extend({ agent: this })
+    this.ctx = this.scope.ctx
+    this.inbox = new PluginInbox(this.ctx.sessionProjections, this.session, this.dispatch)
+    this.scope.ctx.effect(() => () => this.inbox.release(), 'claudeCode.subagentInbox()')
     this.detach = sessions.enter(this.session)
     // Append the descriptor so the projection unit classifies the child.
     // The type name is augmented by @deepseek-ai/dsh-subagent (an optional
@@ -462,7 +469,7 @@ class SubagentChildSession implements Agent {
     this.session.append('turn/start', { turn: this.turn })
     this.session.append('step/start', { turn: this.turn, step: this.step })
     this.stepFlushed = false
-    this.chunkSeqs = []
+    this.assistantStream = this.newAssistantStream(this.turn, this.step)
     this.toolCalls.clear()
     this.reasoningByIndex.clear()
     this.blockOffset = 0
@@ -476,12 +483,21 @@ class SubagentChildSession implements Agent {
     this.step += 1
     this.session.append('step/start', { turn: this.turn, step: this.step })
     this.stepFlushed = false
-    this.chunkSeqs = []
+    this.assistantStream = this.newAssistantStream(this.turn, this.step)
     this.toolCalls.clear()
     this.reasoningByIndex.clear()
     this.blockOffset = 0
     this.maxSeenIndex = -1
     this.lastRawStart = undefined
+  }
+
+  /** Mint a fresh embedded assistant stream for a child step. */
+  private newAssistantStream(turn: number, step: number): PluginAssistantStream {
+    this.assistantStreamStarted = false
+    return new PluginAssistantStream(
+      this.id, ++this.assistantAttemptCounter,
+      () => ++this.assistantStreamRevision, turn, step, this.dispatch,
+    )
   }
 
   /** Flush coalesced assistant content. */
@@ -494,18 +510,24 @@ class SubagentChildSession implements Agent {
     this.pendingUsage = undefined
     this.pendingModel = undefined
     this.reasoningByIndex.clear()
-    this.session.append('assistant/message', {
+    const stream = this.assistantStream.stream
+    const append = (): SessionSeq => this.session.append('assistant/message', {
       turn: this.turn,
       step: this.step,
       message: createAssistantMessage({
         content,
         source: { provider: PROVIDER, model },
       }),
+      stream,
       ...usage === undefined ? {} : { usage },
     }, {
       surfaceOp: 'append',
-      ...this.chunkSeqs.length === 0 ? {} : { sourceEventSeqs: [...this.chunkSeqs] },
-    })
+    }).seq
+    if (this.assistantStreamStarted && !this.assistantStream.ended) {
+      this.assistantStream.settle('assistant/message', append)
+    } else {
+      append()
+    }
     this.stepFlushed = true
   }
 
@@ -533,7 +555,7 @@ class SubagentChildSession implements Agent {
 
 /** Drives one session through turn and step boundaries on Claude Code. */
 export class ClaudeCodeAgent implements Agent {
-  readonly inbox: Inbox
+  readonly inbox: PluginInbox
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
 
@@ -546,6 +568,11 @@ export class ClaudeCodeAgent implements Agent {
 
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
+
+  /** Attached-session-local attempt counter for embedded assistant streams. */
+  private assistantAttemptCounter = 0
+  /** Monotone revision for live assistant-stream frames within this lifecycle. */
+  private assistantStreamRevision = 0
 
   /**
    * Live injection sink for the step currently streaming a Claude query.
@@ -569,15 +596,12 @@ export class ClaudeCodeAgent implements Agent {
     private readonly config: ResolvedConfig,
   ) {
     this.dispatch = agentEvents(loopCtx, this)
-    this.inbox = new Inbox(session, {
-      inserted: (message) => { this.dispatch.emit('agent/inbox/inserted', { message }) },
-      discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
-      claimed: (message, turn) => { this.dispatch.emit('agent/inbox/claimed', { message, turn }) },
-    })
     const lastTurn = session.snapshotEvents().findLast(event => event.type === 'turn/start')?.data.turn ?? 0
     this.phase = { kind: 'idle', lastTurn }
     this.scope = createScope(loopCtx, this)
-    this.ctx = this.scope.ctx.extend({ agent: this })
+    this.ctx = this.scope.ctx
+    this.inbox = new PluginInbox(this.ctx.sessionProjections, session, this.dispatch)
+    this.scope.ctx.effect(() => () => this.inbox.release(), 'claudeCode.inbox()')
   }
 
   get status(): AgentStatus {
@@ -1209,8 +1233,17 @@ export class ClaudeCodeAgent implements Agent {
       input.push(toSdkUserMessage(prompt))
       const query = officialQuery({ prompt: input, options })
       let finished = false
-      /** Seq numbers of the `assistant/chunk` events that streamed the current step, for replay linking. */
-      const chunkSeqs: SessionSeq[] = []
+      /**
+       * Live embedded assistant stream for the current step. Each chunk is
+       * accumulated into a compact `AssistantStreamRecord[]` and published as a
+       * transient `agent/assistant-stream` frame; the compact stream is embedded
+       * in the step's settling `assistant/message`. Recreated at each step roll.
+       */
+      let assistantStream = new PluginAssistantStream(
+        this.id, ++this.assistantAttemptCounter,
+        () => ++this.assistantStreamRevision, turn, step, this.dispatch,
+      )
+      let assistantStreamStarted = false
       /** Per-raw-block-index tool identity, seeded by `mapStreamEvent` at a tool `content_block_start`. */
       const toolCalls = new Map<number, StreamToolCall>()
       /** Accumulated reasoning per rebased block index, for the durable-message fallback below. */
@@ -1271,7 +1304,11 @@ export class ClaudeCodeAgent implements Agent {
         phase.step = step
         this.session.append('step/start', { turn, step })
         stepFlushed = false
-        chunkSeqs.length = 0
+        assistantStream = new PluginAssistantStream(
+          this.id, ++this.assistantAttemptCounter,
+          () => ++this.assistantStreamRevision, turn, step, this.dispatch,
+        )
+        assistantStreamStarted = false
         toolCalls.clear()
         reasoningByIndex.clear()
         blockOffset = 0
@@ -1293,20 +1330,26 @@ export class ClaudeCodeAgent implements Agent {
         pendingUsage = undefined
         pendingModel = undefined
         reasoningByIndex.clear()
-        this.session.append('assistant/message', {
+        const stream = assistantStream.stream
+        const append = (): SessionSeq => this.session.append('assistant/message', {
           turn,
           step,
           message: createAssistantMessage({
             content,
             source: { provider: PROVIDER, model },
           }),
+          stream,
           ...usage === undefined ? {} : { usage },
         }, {
           surfaceOp: 'append',
-          // Link the durable message to the chunks that streamed it, so replay
-          // can reconstruct the partial exactly as shown.
-          ...chunkSeqs.length === 0 ? {} : { sourceEventSeqs: [...chunkSeqs] },
-        })
+        }).seq
+        // Publish the terminal stream frame only after the durable message
+        // commits; abandon the live attempt if the append throws.
+        if (assistantStreamStarted && !assistantStream.ended) {
+          assistantStream.settle('assistant/message', append)
+        } else {
+          append()
+        }
         stepFlushed = true
       }
 
@@ -1359,7 +1402,8 @@ export class ClaudeCodeAgent implements Agent {
                 const highest = maxChunkIndex(chunks)
                 if (highest !== undefined && highest > child.maxSeenIndex) child.maxSeenIndex = highest
                 for (const chunk of chunks) {
-                  child.chunkSeqs.push(child.session.append('assistant/chunk', { turn: child.turn, step: child.step, chunk }).seq)
+                  if (!child.assistantStreamStarted) { child.assistantStream.start(); child.assistantStreamStarted = true }
+                  child.assistantStream.push(chunk)
                   if (chunk.type === 'reasoning-delta') {
                     child.reasoningByIndex.set(chunk.index, (child.reasoningByIndex.get(chunk.index) ?? '') + chunk.text)
                   }
@@ -1380,7 +1424,8 @@ export class ClaudeCodeAgent implements Agent {
             const highest = maxChunkIndex(chunks)
             if (highest !== undefined && highest > maxSeenIndex) maxSeenIndex = highest
             for (const chunk of chunks) {
-              chunkSeqs.push(this.session.append('assistant/chunk', { turn, step, chunk }).seq)
+              if (!assistantStreamStarted) { assistantStream.start(); assistantStreamStarted = true }
+              assistantStream.push(chunk)
               if (chunk.type === 'reasoning-delta') {
                 reasoningByIndex.set(chunk.index, (reasoningByIndex.get(chunk.index) ?? '') + chunk.text)
               }

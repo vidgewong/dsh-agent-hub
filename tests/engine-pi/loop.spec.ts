@@ -9,6 +9,7 @@ import { Readable, Writable } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { PiLoop, PI_SANDBOX_MODES, PI_DISPOSE_GRACE_MS } from '../../src/engine-pi/loop.ts'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import type { PiProcess } from '../../src/engine-pi/rpc/client.ts'
@@ -33,6 +34,7 @@ async function loopCtx(spawn: (spec: unknown) => unknown): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SessionProjectionRegistry)
   ctx.provide('subprocess', { spawn })
   return ctx
 }

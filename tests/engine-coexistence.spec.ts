@@ -19,6 +19,7 @@ import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-setti
 import SessionStore from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { apply } from '../src/index.ts'
 import { hasManagedBlock } from '../src/patch-manager.ts'
@@ -53,6 +54,7 @@ async function boot(doc?: Record<string, unknown>) {
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(LocalSubprocessRuntime)
   const fiber = ctx.plugin(MemorySettings, doc)
   await fiber

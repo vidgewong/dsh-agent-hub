@@ -15,6 +15,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { emitAgentEvent } from '@deepseek-ai/dsh-agent'
 import type {
+  Agent,
   AgentFactory,
   AgentHandle,
   AgentOptions,
@@ -23,9 +24,9 @@ import type {
   ResumeAgentOptions,
   SessionStartSource,
 } from '@deepseek-ai/dsh-agent'
-import { SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset, SessionPreparation, interruptedTurnClosers } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
-import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionPersistence, SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import { CodexAgent } from './agent.ts'
 import type { CodexApprovalPolicy, CodexSandboxMode, ResolvedConfig } from './types.ts'
 import { FactoryOwnership, raceAbort, raceAbortCall } from '../driver-core/ownership.ts'
@@ -111,7 +112,7 @@ declare module '@deepseek-ai/cordis' {
  */
 export class CodexLoop extends Service implements AgentFactory {
   /** Services the loop resolves through its own fiber; blessed identically to the package-level entry inject. */
-  static inject = ['agents', 'sessions', 'systemPrompt']
+  static inject = ['agents', 'sessions', 'systemPrompt', 'sessionProjections']
 
   /** Validated configuration owned by the loop plugin. */
   readonly config: ResolvedConfig
@@ -144,7 +145,7 @@ export class CodexLoop extends Service implements AgentFactory {
    * fuses caller cancellation with lifecycle teardown for setup awaits.
    */
   /* jscpd:ignore-start -- ownership/transaction machinery mirrors the Claude Code loop factory. */
-  private prepare(ownerCtx: Context, id: SessionId, options: AgentOptions, session: Session, callerSignal?: AbortSignal): PreparedAgent {
+  private prepare(ownerCtx: Context, id: SessionId, options: AgentOptions, session: Session, callerSignal?: AbortSignal, parentAgent?: Agent): PreparedAgent {
     ownerCtx.fiber.assertActive()
     /* v8 ignore start -- unreachable backstop, see above */
     /* v8 ignore next -- unreachable backstop, see above */
@@ -231,7 +232,7 @@ export class CodexLoop extends Service implements AgentFactory {
         publish: (source) => {
           assertLive()
           detachSession = agent.ctx.sessions.enter(session)
-          detachAgent = loopCtx.agents.enter(agent, ownerCtx.agent)
+          detachAgent = loopCtx.agents.enter(agent, parentAgent)
           agent.ctx.sessions.announce(session)
           assertLive()
           loopCtx.agents.announce(agent)
@@ -260,13 +261,16 @@ export class CodexLoop extends Service implements AgentFactory {
     setup: AgentSetup | undefined,
     signal: AbortSignal | undefined,
     source: SessionStartSource,
+    parentAgent: Agent | undefined,
+    afterSetup?: (session: Session) => Promise<void>,
   ): Promise<AgentHandle> {
     using ownedPreparation = preparation
     const session = ownedPreparation.session
-    const prepared = this.prepare(ownerCtx, id, agentOptions, session, signal)
+    const prepared = this.prepare(ownerCtx, id, agentOptions, session, signal, parentAgent)
     try {
-      const setupCommit = await raceAbort(setup?.(prepared.agent.ctx), prepared.signal, id)
+      const setupCommit = await raceAbort(setup?.(prepared.agent.ctx, prepared.agent), prepared.signal, id)
       setupCommit?.commit()
+      await afterSetup?.(session)
       return prepared.publish(source)
     } catch (error: unknown) {
       await prepared.dispose()
@@ -294,6 +298,7 @@ export class CodexLoop extends Service implements AgentFactory {
       options.setup,
       options.signal,
       'startup',
+      options.parentAgent,
     )
     this.ownership.trackWrapper(published)
     return published
@@ -321,6 +326,8 @@ export class CodexLoop extends Service implements AgentFactory {
   ): Promise<AgentHandle> {
     const id = options.resumeSessionId
     let preparation: SessionPreparation | undefined
+    let handle: SessionHandle | undefined
+    let stored: { handle: SessionHandle; storedCount: number } | undefined
     try {
       const ownerAbort = new AbortController()
       const unfollowOwner = ownerCtx.effect(() => () => {
@@ -332,17 +339,30 @@ export class CodexLoop extends Service implements AgentFactory {
         this.ownership.signal,
       ])
       try {
-        preparation = await raceAbortCall(
-          () => persistence.prepare(id, fused),
+        handle = await raceAbortCall(
+          () => persistence.open(id, 'write', { signal: fused }),
           fused,
           id,
-          (abandoned) => { abandoned[Symbol.dispose]() },
+          (abandoned) => { void abandoned.close() },
         )
+        const coldRead = await handle.read(0, undefined, { signal: fused })
+        fused.throwIfAborted()
+        const persisted = coldRead.events
+        const closers = interruptedTurnClosers(persisted)
+        if (closers.length > 0) await handle.append(closers)
+        preparation = SessionPreparation.create(this.runtime.ctx.sessions.prepare(id, {
+          seed: [...persisted, ...closers],
+          meta: structuredClone(handle.header),
+          inheritedEventCount: handle.inheritedEventCount,
+          eventState: coldRead.eventState,
+        }))
+        stored = { handle, storedCount: persisted.length + closers.length }
       } finally {
         await unfollowOwner()
       }
       ownerCtx.fiber.assertActive()
       if (!this.ownership.isActive()) throw new Error('agent loop is not active')
+      const capturedStored = stored
       return await this.setupAndPublish(
         ownerCtx,
         id,
@@ -351,10 +371,30 @@ export class CodexLoop extends Service implements AgentFactory {
         options.setup,
         options.signal,
         'resume',
+        options.parentAgent,
+        (session) => this.appendUnstoredSuffix(capturedStored, session),
       )
+    } catch (error: unknown) {
+      await handle?.close().catch(() => {})
+      throw error
     } finally {
       preparation?.[Symbol.dispose]()
     }
+  }
+
+  /**
+   * Persist any events the reconstructed session accumulated beyond the stored
+   * prefix (interrupted-turn closers, setup-time appends) before publication,
+   * so the durable log matches the live session at start.
+   */
+  private async appendUnstoredSuffix(
+    stored: { handle: SessionHandle; storedCount: number } | undefined,
+    session: Session,
+  ): Promise<void> {
+    if (stored === undefined) return
+    const suffix = session.snapshotEvents(SessionLogOffset(stored.storedCount))
+    if (suffix.length > 0) await stored.handle.append(suffix)
+    stored.storedCount += suffix.length
   }
 }
 /* jscpd:ignore-end */

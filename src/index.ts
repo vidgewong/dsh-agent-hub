@@ -236,6 +236,17 @@ function piConfig(config: Config): PiConfig {
  * deployment that omits it should lose only the in-process engine rather than
  * failing the whole plugin tree.
  *
+ * The dynamic import also makes the mount asynchronous, so it must land on the
+ * generation of `loopCtx` that is still active when the import resolves. The
+ * `llm`/`tools` providers this mount depends on reprovision during startup;
+ * each reprovision unloads and reloads the caller's `ctx.inject(['llm','tools'])`
+ * scope, re-invoking this function on a fresh generation. Mounting onto a stale
+ * generation gives the base loop a `loopCtx` whose parent fiber no longer holds
+ * `tools`/`llm`, which surfaces as the intermittent runtime error
+ * `cannot get property "tools" without inject` on the first in-process turn.
+ * The `loopCtx.fiber.assertActive()` guard drops a stale generation so only the
+ * active one mounts.
+ *
  * **Caller requirement**: the base loop declares `static inject = ['agents',
  * 'sessions', 'llm', 'tools', 'systemPrompt']`. The `loopCtx` must descend
  * from a context whose fiber chain carries `llm` and `tools` in its inject,
@@ -254,6 +265,25 @@ export function mountBaseLoop(
 ): void {
   void import('@deepseek-ai/dsh-agent-loop').then(
     ({ default: AgentLoop }) => {
+      // The import is asynchronous, so the `llm`/`tools` providers this mount
+      // depends on may have reprovisioned (model route, provider env, and
+      // settings all settle during `dsh web` startup) between the caller's
+      // `ctx.inject(['llm','tools'], ...)` opening this generation and this
+      // `then` running. Each reprovision unloads the inject-scope fiber
+      // (`store` becomes `undefined`) and reloads it, which re-invokes the
+      // inject callback and calls `mountBaseLoop` again on the fresh, active
+      // generation. Mounting the base loop onto a *stale* generation would give
+      // its `AgentLoop` — and every in-process agent minted under it — a
+      // `loopCtx` whose parent fiber no longer holds `tools`/`llm` in its store,
+      // so the first turn's runtime fiber-walk throws the intermittent
+      // `cannot get property "tools" without inject`. Guard on the current
+      // generation and skip a stale one; the active generation's own callback
+      // performs (or already performed) the real mount.
+      try {
+        loopCtx.fiber?.assertActive()
+      } catch {
+        return
+      }
       // `agents` is the base loop's boot-time declarative composition list.
       // Sessions here are always created on demand through the router, so it
       // is empty — this mount exists only to supply the factory.

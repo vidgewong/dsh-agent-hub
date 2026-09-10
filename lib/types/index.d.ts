@@ -109,6 +109,17 @@ export declare function syncManagedBlock(path: string): Promise<boolean>;
  * deployment that omits it should lose only the in-process engine rather than
  * failing the whole plugin tree.
  *
+ * The dynamic import also makes the mount asynchronous, so it must land on the
+ * generation of `loopCtx` that is still active when the import resolves. The
+ * `llm`/`tools` providers this mount depends on reprovision during startup;
+ * each reprovision unloads and reloads the caller's `ctx.inject(['llm','tools'])`
+ * scope, re-invoking this function on a fresh generation. Mounting onto a stale
+ * generation gives the base loop a `loopCtx` whose parent fiber no longer holds
+ * `tools`/`llm`, which surfaces as the intermittent runtime error
+ * `cannot get property "tools" without inject` on the first in-process turn.
+ * The `loopCtx.fiber.assertActive()` guard drops a stale generation so only the
+ * active one mounts.
+ *
  * **Caller requirement**: the base loop declares `static inject = ['agents',
  * 'sessions', 'llm', 'tools', 'systemPrompt']`. The `loopCtx` must descend
  * from a context whose fiber chain carries `llm` and `tools` in its inject,

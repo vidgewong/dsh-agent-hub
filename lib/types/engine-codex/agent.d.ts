@@ -12,10 +12,10 @@
  * @module dsh-omniloop/engine-codex/agent
  */
 import type { Agent, AgentCancelCause, AgentOptions, AgentStatus, CancelOptions, InboxTarget } from '@deepseek-ai/dsh-agent';
-import { Inbox } from '@deepseek-ai/dsh-agent';
 import type { Scope } from '@deepseek-ai/dsh-scope';
 import type { Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
+import { PluginInbox } from '../driver-core/inbox.ts';
 import type { ResolvedConfig } from './types.ts';
 /** Drives one session through turn and step boundaries on Codex. */
 export declare class CodexAgent implements Agent {
@@ -24,7 +24,7 @@ export declare class CodexAgent implements Agent {
     readonly options: AgentOptions;
     readonly session: Session;
     private readonly config;
-    readonly inbox: Inbox;
+    readonly inbox: PluginInbox;
     private phase;
     private activityDone;
     /** The agent-scoped registration boundary; the lifecycle owner unwinds it after the driver exits. */
@@ -34,11 +34,17 @@ export declare class CodexAgent implements Agent {
     private readonly dispatch;
     /** Whether this loop instance has appended its initial/resume request anchor. */
     private requestHeaderLogged;
+    /** Attached-session-local attempt counter for embedded assistant streams. */
+    private assistantAttemptCounter;
+    /** Monotone revision for live assistant-stream frames within this lifecycle. */
+    private assistantStreamRevision;
     /** Lazily created app-server client, reused across steps and released on scope teardown. */
     private appServer;
     constructor(loopCtx: Context, id: SessionId, options: AgentOptions, session: Session, config: ResolvedConfig);
     /** Return the cached app-server client, spawning one on first use or after a dead process. */
     private appServerClient;
+    /** Mint a fresh embedded assistant stream attempt for one durable message. */
+    private newAssistantStream;
     get status(): AgentStatus;
     /** Commit a phase and publish its externally visible status transition. */
     private setPhase;
